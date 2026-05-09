@@ -4,11 +4,22 @@ import {
   bearingDegrees,
   clampToBoundingBox,
   haversineDistanceKm,
-  knotsToKmPerSecond,
   movePosition,
   pointInPolygon,
 } from "@/lib/geo";
 import { getFleetSeed } from "@/lib/fleet-seed";
+import {
+  calculateFuelBurnTons,
+  calculateTickMovementBudgetKm,
+  estimateDirectRoute,
+  hasInsufficientFuel,
+  HISTORY_INTERVAL_MS,
+  HISTORY_WINDOW_MS,
+  isStoppedStatus,
+  resolveMovingStatus,
+  SIM_TICK_MS,
+  updateRemainingRoute,
+} from "@/lib/simulator/core";
 import type {
   Alert,
   AlertSeverity,
@@ -19,7 +30,6 @@ import type {
   HistorySnapshot,
   LatLng,
   RestrictedZone,
-  RoutePlan,
   ShipState,
   SimulatorCommand,
   SimulatorSnapshot,
@@ -28,33 +38,8 @@ import type {
 
 type Listener = (snapshot: SimulatorSnapshot) => void;
 
-const TICK_MS = 1000;
-const BASE_FUEL_TONS_PER_KM = 0.08;
-const INSUFFICIENT_FUEL_BUFFER = 1.1;
-const HISTORY_INTERVAL_MS = 30_000;
-const HISTORY_WINDOW_MS = 60 * 60 * 1000;
-const STOPPED_STATUSES = new Set<ShipState["status"]>([
-  "arrived",
-  "out_of_fuel",
-  "stranded",
-  "stopped",
-]);
-
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function estimateDirectRoute(shipId: string, from: LatLng, to: LatLng): RoutePlan {
-  const distanceKm = haversineDistanceKm(from, to);
-
-  return {
-    shipId,
-    waypoints: [from, to],
-    distanceKm,
-    estimatedFuelTons: distanceKm * BASE_FUEL_TONS_PER_KM,
-    weatherExposure: "clear",
-    valid: true,
-  };
 }
 
 function analyzeDistressMessage(message: string): DistressAnalysis {
@@ -169,7 +154,7 @@ export class SimulatorStore {
     }
 
     this.lastTickAt = Date.now();
-    this.timer = setInterval(() => this.tick(), TICK_MS);
+    this.timer = setInterval(() => this.tick(), SIM_TICK_MS);
   }
 
   subscribe(listener: Listener): () => void {
@@ -201,7 +186,7 @@ export class SimulatorStore {
       history: this.history,
       metrics: {
         connectedViewers: this.connectedViewers,
-        tickHz: 1000 / TICK_MS,
+        tickHz: 1000 / SIM_TICK_MS,
         activeShips: this.ships.length,
       },
     };
@@ -288,7 +273,7 @@ export class SimulatorStore {
       };
     }
 
-    const canMove = !STOPPED_STATUSES.has(ship.status);
+    const canMove = !isStoppedStatus(ship.status);
     const routeWaypoints =
       ship.currentRoute.valid && ship.currentRoute.waypoints.length >= 2
         ? ship.currentRoute.waypoints
@@ -297,8 +282,15 @@ export class SimulatorStore {
     const targetWaypoint = routeWaypoints[waypointIndex] ?? destination.position;
     const distanceToWaypointKm = haversineDistanceKm(ship.position, targetWaypoint);
     const headingDegrees = canMove ? bearingDegrees(ship.position, targetWaypoint) : ship.headingDegrees;
-    const availableDistanceKm = canMove ? knotsToKmPerSecond(ship.speedKnots) * deltaSeconds : 0;
-    const distanceKm = Math.min(availableDistanceKm, distanceToWaypointKm || distanceToDestinationKm);
+    const movementBudgetKm = canMove
+      ? calculateTickMovementBudgetKm({
+          speedKnots: ship.speedKnots,
+          deltaSeconds,
+          fuelTons: ship.fuelTons,
+          weatherMultiplier: ship.weatherMultiplier,
+        })
+      : 0;
+    const distanceKm = Math.min(movementBudgetKm, distanceToWaypointKm || distanceToDestinationKm);
     const movedPosition = clampToBoundingBox(
       movePosition(ship.position, headingDegrees, distanceKm),
       this.seed.boundingBox,
@@ -306,13 +298,45 @@ export class SimulatorStore {
     const inNavigableWater = pointInPolygon(movedPosition, this.seed.navigableWater);
     const nextPosition = inNavigableWater ? movedPosition : ship.position;
     const actualDistanceKm = inNavigableWater ? distanceKm : 0;
-    const fuelBurn = actualDistanceKm * BASE_FUEL_TONS_PER_KM * ship.weatherMultiplier;
+    const fuelBurn = calculateFuelBurnTons(actualDistanceKm, ship.weatherMultiplier);
     const remainingFuel = Math.max(0, ship.fuelTons - fuelBurn);
-    const remainingRouteFuel = distanceToDestinationKm * BASE_FUEL_TONS_PER_KM * INSUFFICIENT_FUEL_BUFFER;
-    let status = ship.status === "rerouting" ? "normal" : ship.status;
+    const nextWaypointIndex =
+      distanceToWaypointKm <= Math.max(distanceKm, 0.5)
+        ? Math.min(waypointIndex + 1, routeWaypoints.length - 1)
+        : waypointIndex;
+    const remainingRoute = updateRemainingRoute({
+      route: ship.currentRoute,
+      currentPosition: nextPosition,
+      activeWaypointIndex: nextWaypointIndex,
+      fallbackDestination: destination.position,
+      weatherMultiplier: ship.weatherMultiplier,
+    });
+    const nextHasInsufficientFuel = hasInsufficientFuel({
+      fuelTons: remainingFuel,
+      estimatedRouteFuelTons: remainingRoute.estimatedFuelTons,
+    });
+    const status = resolveMovingStatus({
+      currentStatus: ship.status === "rerouting" ? "normal" : ship.status,
+      canMove,
+      remainingFuelTons: remainingFuel,
+      inNavigableWater,
+      hasInsufficientFuel: nextHasInsufficientFuel,
+    });
 
-    if (!inNavigableWater) {
-      status = "stranded";
+    if (status === "out_of_fuel") {
+      ship = { ...ship, speedKnots: 0 };
+      this.upsertAlert(
+        "out_of_fuel",
+        "critical",
+        [ship.id],
+        `${ship.name} is out of fuel and stopped.`,
+        `out_of_fuel:${ship.id}`,
+      );
+    } else {
+      this.resolveAlert(`out_of_fuel:${ship.id}`);
+    }
+
+    if (status === "stranded") {
       ship = { ...ship, speedKnots: 0 };
       this.upsertAlert(
         "stranded",
@@ -321,8 +345,11 @@ export class SimulatorStore {
         `${ship.name} cannot advance without leaving navigable water.`,
         `stranded:${ship.id}`,
       );
-    } else if (canMove && remainingFuel < remainingRouteFuel && status !== "distressed") {
-      status = "insufficient_fuel";
+    } else {
+      this.resolveAlert(`stranded:${ship.id}`);
+    }
+
+    if (status === "insufficient_fuel") {
       this.upsertAlert(
         "insufficient_fuel",
         "warning",
@@ -330,8 +357,8 @@ export class SimulatorStore {
         `${ship.name} may not have enough fuel to reach ${destination.name}.`,
         `fuel:${ship.id}`,
       );
-    } else if (status !== "distressed" && status !== "stopped") {
-      status = "normal";
+    } else {
+      this.resolveAlert(`fuel:${ship.id}`);
     }
 
     this.syncRestrictedZoneAlerts(ship, nextPosition);
@@ -342,13 +369,10 @@ export class SimulatorStore {
       previousPosition: ship.position,
       headingDegrees,
       fuelTons: remainingFuel,
-      speedKnots: status === "stranded" ? 0 : ship.speedKnots,
+      speedKnots: isStoppedStatus(status) ? 0 : ship.speedKnots,
       status,
-      currentRoute: estimateDirectRoute(ship.id, nextPosition, destination.position),
-      activeWaypointIndex:
-        distanceToWaypointKm <= Math.max(distanceKm, 0.5)
-          ? Math.min(waypointIndex + 1, routeWaypoints.length - 1)
-          : waypointIndex,
+      currentRoute: remainingRoute,
+      activeWaypointIndex: 1,
       lastUpdateAt: now,
     };
   }

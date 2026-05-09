@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "verify:sim": "node --no-warnings --experimental-strip-types --experimental-specifier-resolution=node scripts/verify-simulator.mts"
   },
   "dependencies": {
     "next": "16.2.6",

@@ -1,4 +1,4 @@
-import type { BoundingBox, LatLng } from "@/lib/domain";
+import type { BoundingBox, LatLng } from "./domain";
 
 const EARTH_RADIUS_KM = 6371;
 const KM_PER_NAUTICAL_MILE = 1.852;
