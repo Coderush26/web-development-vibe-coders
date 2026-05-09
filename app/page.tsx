@@ -43,6 +43,15 @@ function formatTime(timestamp: number): string {
   }).format(timestamp);
 }
 
+function formatStatus(status: ShipState["status"]): string {
+  return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function toCardinal(deg: number): string {
+  const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  return dirs[Math.round(deg / 45) % 8];
+}
+
 function postJson(path: string, body: unknown): Promise<void> {
   return fetch(path, {
     method: "POST",
@@ -57,17 +66,34 @@ function postJson(path: string, body: unknown): Promise<void> {
   });
 }
 
-function StatusDot({ status }: { status: ShipState["status"] }) {
-  const color =
-    status === "normal"
-      ? "bg-emerald-400"
-      : status === "insufficient_fuel" || status === "rerouting"
-        ? "bg-amber-300"
-        : status === "arrived"
-          ? "bg-cyan-300"
-          : "bg-red-400";
+const MAX_FUEL_TONS = 10000;
 
-  return <span className={`inline-block h-2.5 w-2.5 rounded-full ${color}`} />;
+function statusColor(status: ShipState["status"]) {
+  if (status === "normal" || status === "arrived") return "emerald";
+  if (status === "rerouting" || status === "insufficient_fuel") return "amber";
+  return "red";
+}
+
+function FuelBar({
+  fuel,
+  max = MAX_FUEL_TONS,
+  className = "",
+}: {
+  fuel: number;
+  max?: number;
+  className?: string;
+}) {
+  const pct = Math.max(0, Math.min(100, (fuel / max) * 100));
+  const color =
+    pct > 50 ? "bg-emerald-400" : pct > 25 ? "bg-amber-400" : "bg-red-500";
+  return (
+    <div className={`fuel-bar-track ${className}`}>
+      <div
+        className={`h-full rounded-sm transition-all duration-700 ${color}`}
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  );
 }
 
 export default function Page() {
@@ -166,6 +192,39 @@ export default function Page() {
     return [x, y];
   }
 
+  // Compute a tight viewBox around the actual content so the map fills the panel.
+  const { mapViewBox, mapOriginX, mapOriginY } = useMemo(() => {
+    if (!snapshot)
+      return {
+        mapViewBox: `0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`,
+        mapOriginX: 0,
+        mapOriginY: 0,
+      };
+    const { boundingBox } = snapshot;
+    const px = (pt: LatLng): [number, number] => [
+      ((pt[1] - boundingBox.west) / (boundingBox.east - boundingBox.west)) *
+        MAP_WIDTH,
+      ((boundingBox.north - pt[0]) / (boundingBox.north - boundingBox.south)) *
+        MAP_HEIGHT,
+    ];
+    const pts: LatLng[] = [
+      ...snapshot.navigableWater,
+      ...snapshot.ports.map((p) => p.position),
+    ];
+    const xs = pts.map((p) => px(p)[0]);
+    const ys = pts.map((p) => px(p)[1]);
+    const pad = 55;
+    const x0 = Math.max(0, Math.min(...xs) - pad);
+    const y0 = Math.max(0, Math.min(...ys) - pad);
+    const x1 = Math.min(MAP_WIDTH, Math.max(...xs) + pad);
+    const y1 = Math.min(MAP_HEIGHT, Math.max(...ys) + pad);
+    return {
+      mapViewBox: `${x0 | 0} ${y0 | 0} ${(x1 - x0) | 0} ${(y1 - y0) | 0}`,
+      mapOriginX: x0,
+      mapOriginY: y0,
+    };
+  }, [snapshot]);
+
   async function issueDirective(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const payload =
@@ -217,109 +276,149 @@ export default function Page() {
 
   if (!snapshot) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-[#071013] text-slate-100">
-        <div className="border border-cyan-300/30 bg-cyan-300/10 px-6 py-4 text-sm uppercase tracking-[0.2em] text-cyan-100">
-          Connecting to simulator stream
+      <main className="flex min-h-screen items-center justify-center bg-[#050d12] text-slate-100">
+        <div className="flex flex-col items-center gap-4">
+          <div className="relative flex h-4 w-4">
+            <span className="live-ring" />
+            <span className="relative inline-flex h-4 w-4 rounded-full bg-cyan-400" />
+          </div>
+          <p className="text-xs uppercase tracking-[0.25em] text-cyan-400/80">
+            Connecting to simulator stream
+          </p>
         </div>
       </main>
     );
   }
 
+  const destName = (id: string) =>
+    snapshot.ports.find((p) => p.id === id)?.name ?? id;
+
   return (
-    <main className="min-h-screen bg-[#071013] text-slate-100">
-      <header className="border-b border-white/10 bg-[#0b1518] px-5 py-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-semibold tracking-wide">
-              Fleet Crisis Command
-            </h1>
-            <p className="text-xs text-slate-400">
-              {snapshot.scenarioName} - {snapshot.metrics.activeShips} ships -
-              tick {snapshot.tick} - v{snapshot.stateVersion}
-            </p>
+    <main className="min-h-screen bg-[#050d12] text-slate-100">
+      {/* Top accent bar */}
+      <div className="h-[2px] w-full bg-linear-to-r from-transparent via-cyan-400 to-transparent opacity-70" />
+
+      <header className="border-b border-white/8 bg-[#07151a] px-4 py-2.5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="relative flex h-2.5 w-2.5 shrink-0">
+              <span className="live-ring" />
+              <span className="relative z-10 inline-flex h-2.5 w-2.5 rounded-full bg-emerald-400" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-bold tracking-widest text-white uppercase sm:text-base lg:text-lg">
+                Fleet Crisis Command
+              </h1>
+              <p className="hidden text-[10px] tracking-wider text-slate-500 uppercase sm:block">
+                {snapshot.scenarioName}&ensp;·&ensp;
+                <span className="text-cyan-400">
+                  {snapshot.metrics.activeShips} ships
+                </span>
+                &ensp;·&ensp;tick {snapshot.tick}
+              </p>
+            </div>
           </div>
-          <div className="flex items-center gap-2 text-xs">
-            <span className="border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-emerald-100">
+
+          <div className="flex shrink-0 items-center gap-1.5 text-xs">
+            <span className="rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-300 uppercase tracking-wider">
               {connectionState}
             </span>
-            <span className="border border-white/10 px-3 py-1 text-slate-300">
-              viewers {snapshot.metrics.connectedViewers}
+            <span className="hidden rounded-sm border border-white/8 bg-white/4 px-2 py-1 text-[10px] text-slate-400 md:inline">
+              {snapshot.metrics.connectedViewers}v
             </span>
-            <span className="border border-white/10 px-3 py-1 text-slate-300">
-              lag {streamLagMs}ms
+            <span className="hidden rounded-sm border border-white/8 bg-white/4 px-2 py-1 text-[10px] text-slate-400 sm:inline">
+              <span className="text-cyan-300">{streamLagMs}ms</span>
             </span>
-            <div className="flex border border-white/10">
+            <div className="flex overflow-hidden rounded-sm border border-white/10">
               <button
-                className={`px-3 py-1 ${role === "command" ? "bg-cyan-300 text-slate-950" : "text-slate-300"}`}
+                className={`px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider transition-colors sm:px-3 sm:text-xs ${role === "command" ? "bg-cyan-400 text-slate-950" : "text-slate-400 hover:text-slate-200"}`}
                 onClick={() => setRole("command")}
                 type="button"
               >
-                Command
+                Cmd
               </button>
+              <div className="w-px bg-white/10" />
               <button
-                className={`px-3 py-1 ${role === "captain" ? "bg-cyan-300 text-slate-950" : "text-slate-300"}`}
+                className={`px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider transition-colors sm:px-3 sm:text-xs ${role === "captain" ? "bg-cyan-400 text-slate-950" : "text-slate-400 hover:text-slate-200"}`}
                 onClick={() => {
                   setCaptainShipId(selectedShipId);
                   setRole("captain");
                 }}
                 type="button"
               >
-                Captain
+                Cpt
               </button>
             </div>
           </div>
         </div>
       </header>
 
-      <div className="grid min-h-[calc(100vh-65px)] grid-cols-1 xl:grid-cols-[320px_1fr_360px]">
-        <aside className="border-b border-white/10 bg-[#0b1518] p-4 xl:border-b-0 xl:border-r">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+      <div className="grid grid-cols-1 lg:h-[calc(100vh-49px)] lg:overflow-hidden lg:grid-cols-[280px_1fr_320px] xl:grid-cols-[300px_1fr_340px]">
+        {/* ── Fleet list ── */}
+        <aside className="flex flex-col overflow-hidden border-b border-white/6 bg-[#07151a] lg:border-b-0 lg:border-r">
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/6">
+            <span className="text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
               Fleet
-            </h2>
-            <span className="text-xs text-slate-500">
+            </span>
+            <span className="font-mono text-[10px] text-slate-600">
               {formatTime(snapshot.serverTime)}
             </span>
           </div>
-          <div className="max-h-[44vh] space-y-2 overflow-auto pr-1 xl:max-h-[70vh]">
-            {listedShips.map((ship) => (
-              <button
-                className={`grid w-full grid-cols-[1fr_auto] gap-2 border px-3 py-2 text-left transition ${
-                  selectedShipId === ship.id
-                    ? "border-cyan-300 bg-cyan-300/12"
-                    : "border-white/10 bg-white/3 hover:border-white/25"
-                }`}
-                key={ship.id}
-                onClick={() => {
-                  if (role === "command") {
-                    setSelectedShipId(ship.id);
-                    setCaptainShipId(ship.id);
-                  }
-                }}
-                type="button"
-              >
-                <span>
-                  <span className="flex items-center gap-2 text-sm font-medium">
-                    <StatusDot status={ship.status} /> {ship.name}
-                  </span>
-                  <span className="mt-1 block text-xs text-slate-400">
-                    {ship.id} - {ship.cargo} - {ship.speedKnots.toFixed(0)} kt
-                  </span>
-                </span>
-                <span className="text-right text-xs text-slate-300">
-                  {ship.fuelTons.toFixed(0)}
-                  <span className="block text-slate-500">tons</span>
-                </span>
-              </button>
-            ))}
+          <div className="thin-scroll max-h-48 overflow-y-auto lg:max-h-none lg:flex-1">
+            {listedShips.map((ship) => {
+              const sc = statusColor(ship.status);
+              const dotColor =
+                sc === "emerald"
+                  ? "bg-emerald-400"
+                  : sc === "amber"
+                    ? "bg-amber-400"
+                    : "bg-red-400";
+              const selected = selectedShipId === ship.id;
+              return (
+                <button
+                  className={`w-full px-4 py-2.5 text-left transition-colors duration-100 border-b border-white/4 ${
+                    selected ? "bg-cyan-400/10" : "hover:bg-white/4"
+                  }`}
+                  key={ship.id}
+                  onClick={() => {
+                    if (role === "command") {
+                      setSelectedShipId(ship.id);
+                      setCaptainShipId(ship.id);
+                    }
+                  }}
+                  type="button"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-2">
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full shrink-0 ${dotColor}`}
+                      />
+                      <span
+                        className={`text-sm font-medium ${selected ? "text-cyan-300" : "text-slate-200"}`}
+                      >
+                        {ship.name}
+                      </span>
+                    </span>
+                    <span className="font-mono text-xs text-slate-500">
+                      {ship.speedKnots.toFixed(0)}kt ·{" "}
+                      {ship.fuelTons.toFixed(0)}t
+                    </span>
+                  </div>
+                  <FuelBar fuel={ship.fuelTons} className="mt-1.5 ml-3.5" />
+                </button>
+              );
+            })}
           </div>
         </aside>
 
-        <section className="relative min-h-[520px] bg-[#0a1c22]">
+        {/* ── Map ── */}
+        <section className="relative map-scanlines bg-[#061018] flex flex-col">
           <svg
-            className="h-full min-h-[520px] w-full"
-            viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
+            className="w-full"
+            style={{ minHeight: 260, height: "100%", flex: "1 1 0%" }}
+            viewBox={mapViewBox}
             role="img"
+            preserveAspectRatio="xMidYMid meet"
           >
             <defs>
               <pattern
@@ -331,124 +430,163 @@ export default function Page() {
                 <path
                   d="M 50 0 L 0 0 0 50"
                   fill="none"
-                  stroke="rgba(148, 163, 184, 0.12)"
+                  stroke="rgba(148,163,184,0.06)"
                   strokeWidth="1"
                 />
               </pattern>
+              <radialGradient id="mapVignette" cx="50%" cy="50%" r="70%">
+                <stop offset="0%" stopColor="transparent" />
+                <stop offset="100%" stopColor="rgba(5,13,18,0.6)" />
+              </radialGradient>
+              <filter id="glow">
+                <feGaussianBlur stdDeviation="2" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
             </defs>
-            <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="#08212a" />
-            <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="url(#grid)" />
-            <rect
-              fill="none"
-              height={MAP_HEIGHT}
-              stroke="rgba(103, 232, 249, 0.45)"
-              strokeWidth="2"
-              width={MAP_WIDTH}
-              x={0}
-              y={0}
-            />
-            <polygon
-              fill="rgba(20, 184, 166, 0.13)"
-              points={snapshot.navigableWater
-                .map((point) => project(point).join(","))
-                .join(" ")}
-              stroke="rgba(45, 212, 191, 0.55)"
-              strokeWidth="2"
-            />
-            {visibleShips.map((ship) => {
-              const routePoints = ship.currentRoute.waypoints
-                .map((point) => project(point).join(","))
-                .join(" ");
-              if (!routePoints) {
-                return null;
-              }
 
+            <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="#061822" />
+            <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="url(#grid)" />
+
+            {/* Navigable bounds (operating area bounding box) */}
+            {(() => {
+              const bb = snapshot.boundingBox;
+              const [x0, y0] = project([bb.north, bb.west]);
+              const [x1, y1] = project([bb.south, bb.east]);
               return (
-                <polyline
+                <rect
                   fill="none"
-                  key={`route-${ship.id}`}
-                  points={routePoints}
-                  stroke={
-                    ship.id === selectedShipId
-                      ? "rgba(103, 232, 249, 0.95)"
-                      : "rgba(203, 213, 225, 0.45)"
-                  }
-                  strokeDasharray={ship.id === selectedShipId ? "0" : "6 5"}
-                  strokeWidth={ship.id === selectedShipId ? "2.5" : "1.5"}
+                  height={y1 - y0}
+                  stroke="rgba(251,191,36,0.55)"
+                  strokeDasharray="12 6"
+                  strokeWidth="1.5"
+                  width={x1 - x0}
+                  x={x0}
+                  y={y0}
                 />
               );
-            })}
+            })()}
+
+            {/* Navigable water */}
+            <polygon
+              fill="rgba(6,182,212,0.07)"
+              points={snapshot.navigableWater
+                .map((p) => project(p).join(","))
+                .join(" ")}
+              stroke="rgba(6,182,212,0.35)"
+              strokeWidth="1.5"
+            />
+
+            {/* Restricted zones */}
             {snapshot.restrictedZones.map((zone) => (
               <polygon
-                fill="rgba(239, 68, 68, 0.22)"
+                fill="rgba(239,68,68,0.15)"
                 key={zone.id}
-                points={zone.polygon
-                  .map((point) => project(point).join(","))
-                  .join(" ")}
-                stroke="rgba(248, 113, 113, 0.9)"
-                strokeDasharray="8 6"
+                points={zone.polygon.map((p) => project(p).join(",")).join(" ")}
+                stroke="rgba(248,113,113,0.85)"
+                strokeDasharray="8 5"
                 strokeWidth="2"
               />
             ))}
+
+            {/* Weather samples */}
             {snapshot.weatherSamples.map((sample) => {
               const [x, y] = project(sample.position);
-              const adverse = sample.adverse;
-
               return (
                 <g key={sample.id}>
                   <circle
                     cx={x}
                     cy={y}
                     fill={
-                      adverse
-                        ? "rgba(244, 63, 94, 0.16)"
-                        : "rgba(34, 211, 238, 0.12)"
+                      sample.adverse
+                        ? "rgba(244,63,94,0.12)"
+                        : "rgba(6,182,212,0.08)"
                     }
-                    r={adverse ? 42 : 28}
+                    r={sample.adverse ? 44 : 30}
                     stroke={
-                      adverse
-                        ? "rgba(251, 113, 133, 0.95)"
-                        : "rgba(103, 232, 249, 0.7)"
+                      sample.adverse
+                        ? "rgba(251,113,133,0.7)"
+                        : "rgba(6,182,212,0.45)"
                     }
-                    strokeDasharray={adverse ? "7 5" : "0"}
+                    strokeDasharray={sample.adverse ? "6 4" : "0"}
                     strokeWidth="1.5"
                   />
                   <text
                     fill={
-                      adverse
-                        ? "rgba(254, 205, 211, 0.95)"
-                        : "rgba(165, 243, 252, 0.95)"
+                      sample.adverse
+                        ? "rgba(252,165,165,0.9)"
+                        : "rgba(103,232,249,0.8)"
                     }
-                    fontSize="11"
-                    x={x + 10}
-                    y={y - 10}
+                    fontSize="10"
+                    x={x + 8}
+                    y={y - 8}
                   >
-                    {adverse ? "adverse +30% fuel" : "clear"}
+                    {sample.adverse ? "⚠ +30% fuel" : "clear"}
                   </text>
                 </g>
               );
             })}
+
+            {/* Routes */}
+            {visibleShips.map((ship) => {
+              const pts = ship.currentRoute.waypoints
+                .map((p) => project(p).join(","))
+                .join(" ");
+              if (!pts) return null;
+              const sel = ship.id === selectedShipId;
+              return (
+                <polyline
+                  fill="none"
+                  key={`route-${ship.id}`}
+                  points={pts}
+                  stroke={
+                    sel ? "rgba(6,182,212,0.9)" : "rgba(148,163,184,0.25)"
+                  }
+                  strokeDasharray={sel ? "0" : "6 5"}
+                  strokeWidth={sel ? "2" : "1"}
+                />
+              );
+            })}
+
+            {/* Ports */}
             {snapshot.ports.map((port) => {
               const [x, y] = project(port.position);
-
               return (
                 <g key={port.id}>
                   <rect
-                    fill="#d9f99d"
-                    height="10"
-                    width="10"
-                    x={x - 5}
-                    y={y - 5}
+                    fill="#bef264"
+                    height="8"
+                    width="8"
+                    x={x - 4}
+                    y={y - 4}
+                    opacity="0.9"
                   />
-                  <text fill="#d9f99d" fontSize="13" x={x + 8} y={y + 4}>
+                  <text
+                    fill="#bef264"
+                    fontSize="11"
+                    opacity="0.85"
+                    x={x + 7}
+                    y={y + 4}
+                  >
                     {port.name}
                   </text>
                 </g>
               );
             })}
+
+            {/* Ships */}
             {visibleShips.map((ship) => {
               const [x, y] = project(ship.position);
-              const selected = ship.id === selectedShipId;
+              const sel = ship.id === selectedShipId;
+              const sc = statusColor(ship.status);
+              const strokeClr =
+                sc === "emerald"
+                  ? "#042f2e"
+                  : sc === "amber"
+                    ? "#92400e"
+                    : "#7f1d1d";
 
               return (
                 <g
@@ -458,228 +596,367 @@ export default function Page() {
                     setSelectedShipId(ship.id);
                     setCaptainShipId(ship.id);
                   }}
-                  transform={`translate(${x} ${y}) rotate(${ship.headingDegrees})`}
                 >
-                  <path
-                    d="M 0 -12 L 8 10 L 0 6 L -8 10 Z"
-                    fill={selected ? "#67e8f9" : "#f8fafc"}
-                    stroke={ship.status === "normal" ? "#042f2e" : "#f59e0b"}
-                    strokeWidth="2"
-                  />
-                  <circle
-                    fill="transparent"
-                    r="16"
-                    stroke={selected ? "#67e8f9" : "transparent"}
-                    strokeWidth="2"
-                  />
+                  {sel && (
+                    <circle
+                      cx={x}
+                      cy={y}
+                      r="22"
+                      fill="none"
+                      stroke="rgba(6,182,212,0.2)"
+                      strokeWidth="1"
+                    />
+                  )}
+                  <g
+                    transform={`translate(${x} ${y}) rotate(${ship.headingDegrees})`}
+                    filter={sel ? "url(#glow)" : undefined}
+                  >
+                    <path
+                      d="M 0 -11 L 7 9 L 0 5 L -7 9 Z"
+                      fill={
+                        sel
+                          ? "#22d3ee"
+                          : sc === "amber"
+                            ? "#fbbf24"
+                            : sc === "red"
+                              ? "#f87171"
+                              : "#e2e8f0"
+                      }
+                      stroke={strokeClr}
+                      strokeWidth="1.5"
+                    />
+                  </g>
+                  {sel && (
+                    <text
+                      fill="#22d3ee"
+                      fontSize="11"
+                      fontWeight="700"
+                      textAnchor="middle"
+                      x={x}
+                      y={y - 26}
+                      letterSpacing="0.5"
+                      style={{ pointerEvents: "none" }}
+                    >
+                      {ship.name}
+                    </text>
+                  )}
                 </g>
               );
             })}
+
+            {/* North arrow — anchored to top-left of the tight viewBox */}
+            <g transform={`translate(${mapOriginX + 28},${mapOriginY + 28})`}>
+              <circle
+                cx="0"
+                cy="0"
+                r="16"
+                fill="rgba(5,13,18,0.7)"
+                stroke="rgba(6,182,212,0.25)"
+                strokeWidth="1"
+              />
+              <path d="M 0 -10 L 3.5 4 L 0 2 L -3.5 4 Z" fill="#e2e8f0" />
+              <text
+                fill="#64748b"
+                fontSize="8"
+                fontWeight="700"
+                textAnchor="middle"
+                x="0"
+                y="20"
+              >
+                N
+              </text>
+            </g>
+
+            {/* Vignette overlay */}
+            <rect
+              width={MAP_WIDTH}
+              height={MAP_HEIGHT}
+              fill="url(#mapVignette)"
+              style={{ pointerEvents: "none" }}
+            />
           </svg>
 
-          <div className="absolute bottom-4 left-4 right-4 flex flex-wrap gap-2 text-xs">
-            <span className="border border-white/10 bg-black/30 px-3 py-1">
-              SSE live sync - 1 Hz backend tick
+          {/* Map status bar */}
+          <div className="absolute bottom-0 left-0 right-0 flex items-center gap-0 border-t border-white/6 bg-black/40 text-[10px] text-slate-500 uppercase tracking-wider backdrop-blur-sm">
+            <span className="border-r border-white/6 px-3 py-2 text-emerald-400">
+              ● SSE 1Hz
             </span>
-            <span className="border border-white/10 bg-black/30 px-3 py-1">
-              Client interpolation active
+            <span className="border-r border-white/6 px-3 py-2">
+              Interp active
             </span>
-            <span className="border border-white/10 bg-black/30 px-3 py-1">
-              Routes {visibleShips.length} - weather samples{" "}
-              {snapshot.weatherSamples.length}
+            <span className="border-r border-white/6 px-3 py-2">
+              {visibleShips.length} routes
             </span>
-            <span className="border border-white/10 bg-black/30 px-3 py-1">
-              {snapshot.restrictedZones.length} zones - {activeAlerts.length}{" "}
-              active alerts
+            <span className="border-r border-white/6 px-3 py-2">
+              {snapshot.weatherSamples.length} wx
+            </span>
+            <span className="border-r border-white/6 px-3 py-2">
+              {snapshot.restrictedZones.length} zones
+            </span>
+            <span
+              className={
+                activeAlerts.length > 0 ? "px-3 py-2 text-red-400" : "px-3 py-2"
+              }
+            >
+              {activeAlerts.length} alerts
             </span>
           </div>
         </section>
 
-        <aside className="border-t border-white/10 bg-[#0b1518] p-4 xl:border-l xl:border-t-0">
+        {/* ── Right panel ── */}
+        <aside className="thin-scroll flex flex-col overflow-y-auto border-t border-white/6 bg-[#07151a] lg:border-t-0 lg:border-l">
           {role === "command" ? (
-            <div className="space-y-5">
-              <section className="border border-white/10 bg-white/3 p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+            <>
+              {/* Selected Ship */}
+              <div className="border-b border-white/6 p-4">
+                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
                   Selected Ship
-                </h2>
+                </p>
                 {selectedShip && (
-                  <dl className="mt-3 grid grid-cols-2 gap-3 text-sm">
-                    <div>
-                      <dt className="text-xs text-slate-500">Name</dt>
-                      <dd>{selectedShip.name}</dd>
+                  <>
+                    <div className="flex items-start justify-between gap-2 mb-3">
+                      <div>
+                        <p className="text-base font-bold text-white leading-tight">
+                          {selectedShip.name}
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          {selectedShip.id} · {selectedShip.cargo}
+                        </p>
+                      </div>
+                      <span
+                        className={`mt-0.5 shrink-0 rounded px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest ${
+                          statusColor(selectedShip.status) === "emerald"
+                            ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30"
+                            : statusColor(selectedShip.status) === "amber"
+                              ? "bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30"
+                              : "bg-red-500/15 text-red-300 ring-1 ring-red-500/30"
+                        }`}
+                      >
+                        {formatStatus(selectedShip.status)}
+                      </span>
                     </div>
-                    <div>
-                      <dt className="text-xs text-slate-500">Status</dt>
-                      <dd>{selectedShip.status}</dd>
+                    <div className="mb-3">
+                      <div className="mb-1 flex justify-between text-[10px]">
+                        <span className="text-slate-600 uppercase tracking-wider">
+                          Fuel
+                        </span>
+                        <span className="font-mono text-slate-400">
+                          {selectedShip.fuelTons.toFixed(0)} t
+                        </span>
+                      </div>
+                      <FuelBar fuel={selectedShip.fuelTons} />
                     </div>
-                    <div>
-                      <dt className="text-xs text-slate-500">Fuel</dt>
-                      <dd>{selectedShip.fuelTons.toFixed(1)} tons</dd>
+                    <div className="grid grid-cols-2 gap-3">
+                      {[
+                        ["Speed", `${selectedShip.speedKnots.toFixed(1)} kt`],
+                        [
+                          "Heading",
+                          `${selectedShip.headingDegrees.toFixed(0)}° ${toCardinal(selectedShip.headingDegrees)}`,
+                        ],
+                        ["Dest", destName(selectedShip.destinationPortId)],
+                      ].map(([label, val]) => (
+                        <div
+                          key={label}
+                          className={label === "Dest" ? "col-span-2" : ""}
+                        >
+                          <p className="text-[9px] uppercase tracking-wider text-slate-600">
+                            {label}
+                          </p>
+                          <p className="mt-0.5 font-mono text-sm text-slate-200">
+                            {val}
+                          </p>
+                        </div>
+                      ))}
                     </div>
-                    <div>
-                      <dt className="text-xs text-slate-500">Heading</dt>
-                      <dd>{selectedShip.headingDegrees.toFixed(0)} deg</dd>
-                    </div>
-                    <div className="col-span-2">
-                      <dt className="text-xs text-slate-500">Cargo</dt>
-                      <dd>{selectedShip.cargo}</dd>
-                    </div>
-                  </dl>
+                  </>
                 )}
-              </section>
+              </div>
 
-              <form
-                className="border border-white/10 bg-white/3 p-4"
-                onSubmit={issueDirective}
-              >
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+              {/* Directive */}
+              <div className="border-b border-white/6 p-4">
+                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
                   Directive
-                </h2>
-                <div className="mt-3 grid gap-3">
+                </p>
+                <form onSubmit={issueDirective} className="flex flex-col gap-2">
                   <select
-                    className="border border-white/10 bg-[#071013] px-3 py-2 text-sm"
-                    onChange={(event) =>
-                      setDirectiveType(event.target.value as DirectiveType)
+                    className="w-full border border-white/8 bg-[#050d12] px-3 py-2 text-sm text-slate-200 focus:border-cyan-400/40 focus:outline-none"
+                    onChange={(e) =>
+                      setDirectiveType(e.target.value as DirectiveType)
                     }
                     value={directiveType}
                   >
-                    {Object.entries(directiveLabels).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
+                    {Object.entries(directiveLabels).map(([v, l]) => (
+                      <option key={v} value={v}>
+                        {l}
                       </option>
                     ))}
                   </select>
                   {directiveType === "CHANGE_SPEED" && (
                     <input
-                      className="border border-white/10 bg-[#071013] px-3 py-2 text-sm"
+                      className="w-full border border-white/8 bg-[#050d12] px-3 py-2 text-sm text-slate-200 focus:border-cyan-400/40 focus:outline-none"
                       max={28}
                       min={0}
-                      onChange={(event) =>
-                        setSpeedKnots(Number(event.target.value))
-                      }
                       type="number"
                       value={speedKnots}
+                      onChange={(e) => setSpeedKnots(Number(e.target.value))}
                     />
                   )}
                   {directiveType === "REROUTE_PORT" && (
                     <select
-                      className="border border-white/10 bg-[#071013] px-3 py-2 text-sm"
-                      onChange={(event) =>
-                        setDestinationPortId(event.target.value)
-                      }
+                      className="w-full border border-white/8 bg-[#050d12] px-3 py-2 text-sm text-slate-200 focus:border-cyan-400/40 focus:outline-none"
+                      onChange={(e) => setDestinationPortId(e.target.value)}
                       value={destinationPortId}
                     >
-                      {snapshot.ports.map((port) => (
-                        <option key={port.id} value={port.id}>
-                          {port.name}
+                      {snapshot.ports.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
                         </option>
                       ))}
                     </select>
                   )}
                   <button
-                    className="bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950"
+                    className="w-full bg-cyan-400 py-2 text-xs font-bold uppercase tracking-widest text-slate-950 hover:bg-cyan-300 transition-colors"
                     type="submit"
                   >
                     Issue to {selectedShip?.name}
                   </button>
                   <button
-                    className="border border-red-300/50 px-3 py-2 text-sm text-red-100"
+                    className="w-full border border-white/10 py-2 text-xs text-slate-400 hover:border-red-500/40 hover:text-red-300 transition-colors"
                     onClick={createZoneAroundShip}
                     type="button"
                   >
                     Create Zone Around Ship
                   </button>
-                </div>
-              </form>
+                </form>
+              </div>
 
-              <section className="border border-white/10 bg-white/3 p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
-                  Alerts
-                </h2>
-                <div className="mt-3 max-h-72 space-y-2 overflow-auto">
-                  {activeAlerts.length === 0 && (
-                    <p className="text-sm text-slate-500">
-                      No unacknowledged alerts.
-                    </p>
+              {/* Alerts */}
+              <div className="flex flex-1 flex-col p-4">
+                <div className="mb-3 flex items-center gap-2">
+                  <p className="text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
+                    Alerts
+                  </p>
+                  {activeAlerts.length > 0 && (
+                    <span className="rounded bg-red-500 px-1.5 py-0.5 text-[9px] font-bold text-white">
+                      {activeAlerts.length}
+                    </span>
                   )}
-                  {activeAlerts.map((alert) => (
-                    <div
-                      className={`border p-3 text-sm ${severityClass(alert.severity)}`}
-                      key={alert.id}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <p>{alert.message}</p>
-                        <button
-                          className="border border-white/20 px-2 py-1 text-xs"
-                          onClick={() =>
-                            postJson("/api/sim/alerts/ack", {
-                              alertId: alert.id,
-                            })
-                          }
-                          type="button"
-                        >
-                          Ack
-                        </button>
-                      </div>
-                      <p className="mt-2 text-xs opacity-70">
-                        {alert.type} - {formatTime(alert.createdAt)}
-                      </p>
-                    </div>
-                  ))}
                 </div>
-              </section>
-            </div>
-          ) : (
-            <div className="space-y-5">
-              <section className="border border-white/10 bg-white/3 p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
-                  Captain Console
-                </h2>
-                {captainShip && (
-                  <div className="mt-3 border border-white/10 bg-[#071013] p-3 text-sm text-slate-300">
-                    {captainShip.name} - {captainShip.status} -{" "}
-                    {captainShip.fuelTons.toFixed(0)} tons fuel
+                {activeAlerts.length === 0 ? (
+                  <p className="text-xs text-slate-600">No active alerts.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {activeAlerts.map((alert) => (
+                      <div
+                        className={`border p-3 text-xs ${severityClass(alert.severity)}`}
+                        key={alert.id}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="leading-snug">{alert.message}</p>
+                          <button
+                            className="shrink-0 border border-white/15 px-2 py-0.5 text-[10px] hover:bg-white/8"
+                            onClick={() =>
+                              postJson("/api/sim/alerts/ack", {
+                                alertId: alert.id,
+                              })
+                            }
+                            type="button"
+                          >
+                            Ack
+                          </button>
+                        </div>
+                        <p className="mt-1.5 text-[10px] opacity-50">
+                          {alert.type} · {formatTime(alert.createdAt)}
+                        </p>
+                      </div>
+                    ))}
                   </div>
                 )}
-                <p className="mt-3 text-xs text-slate-500">
-                  Captain session scoped to {captainShip?.id}. Switch back to
-                  Command to inspect another vessel.
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Captain Console */}
+              <div className="border-b border-white/6 p-4">
+                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
+                  Captain Console
                 </p>
-              </section>
-
-              <section className="border border-white/10 bg-white/3 p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
-                  Pending Directives
-                </h2>
-                <div className="mt-3 space-y-3">
-                  {pendingCaptainDirectives.length === 0 && (
-                    <p className="text-sm text-slate-500">
-                      No directives awaiting response.
+                {captainShip && (
+                  <>
+                    <p className="text-base font-bold text-white">
+                      {captainShip.name}
                     </p>
-                  )}
-                  {pendingCaptainDirectives.map((directive) => (
+                    <p className="mt-0.5 text-[11px] text-slate-500">
+                      {captainShip.id}
+                    </p>
+                    <div className="mt-3 mb-1 flex justify-between text-[10px]">
+                      <span className="uppercase tracking-wider text-slate-600">
+                        Fuel
+                      </span>
+                      <span className="font-mono text-slate-400">
+                        {captainShip.fuelTons.toFixed(0)} t
+                      </span>
+                    </div>
+                    <FuelBar fuel={captainShip.fuelTons} />
+                    <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                      {[
+                        ["Status", formatStatus(captainShip.status)],
+                        ["Speed", `${captainShip.speedKnots.toFixed(1)} kt`],
+                        [
+                          "Heading",
+                          `${captainShip.headingDegrees.toFixed(0)}° ${toCardinal(captainShip.headingDegrees)}`,
+                        ],
+                        ["Dest", destName(captainShip.destinationPortId)],
+                        ["Cargo", captainShip.cargo],
+                      ].map(([label, val]) => (
+                        <div key={label}>
+                          <p className="text-[9px] uppercase tracking-wider text-slate-600">
+                            {label}
+                          </p>
+                          <p className="mt-0.5 font-mono text-slate-200 truncate">
+                            {val}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-3 text-[10px] text-slate-600">
+                      Scoped to {captainShip.id}.
+                    </p>
+                  </>
+                )}
+              </div>
+
+              {/* Pending Directives */}
+              <div className="border-b border-white/6 p-4">
+                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
+                  Pending Directives
+                </p>
+                {pendingCaptainDirectives.length === 0 ? (
+                  <p className="text-xs text-slate-600">
+                    No directives awaiting response.
+                  </p>
+                ) : (
+                  pendingCaptainDirectives.map((directive) => (
                     <div
-                      className="border border-white/10 bg-[#071013] p-3"
+                      className="border border-white/8 p-3"
                       key={directive.id}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-semibold text-slate-200">
                           {directiveLabels[directive.type]}
                         </span>
-                        <span className="text-xs text-slate-500">
+                        <span className="font-mono text-[10px] text-slate-600">
                           {formatTime(directive.issuedAt)}
                         </span>
                       </div>
                       <textarea
-                        className="mt-3 h-20 w-full border border-white/10 bg-black/25 p-2 text-sm text-slate-100"
-                        onChange={(event) =>
-                          setDistressMessage(event.target.value)
-                        }
+                        className="h-20 w-full border border-white/8 bg-black/20 p-2 text-xs text-slate-200 focus:border-cyan-400/40 focus:outline-none"
+                        onChange={(e) => setDistressMessage(e.target.value)}
                         value={distressMessage}
                       />
-                      <div className="mt-3 grid grid-cols-2 gap-2">
+                      <div className="mt-2 grid grid-cols-2 gap-2">
                         <button
-                          className="bg-emerald-300 px-3 py-2 text-sm font-semibold text-slate-950"
+                          className="bg-emerald-400 py-2 text-xs font-bold uppercase tracking-wider text-slate-950 hover:bg-emerald-300"
                           onClick={() =>
                             respondToDirective(directive.id, "ACCEPT")
                           }
@@ -688,7 +965,7 @@ export default function Page() {
                           Accept
                         </button>
                         <button
-                          className="border border-red-300/50 px-3 py-2 text-sm text-red-100"
+                          className="border border-red-500/40 py-2 text-xs text-red-300 hover:bg-red-500/10"
                           onClick={() =>
                             respondToDirective(
                               directive.id,
@@ -701,20 +978,22 @@ export default function Page() {
                         </button>
                       </div>
                     </div>
-                  ))}
-                </div>
-              </section>
+                  ))
+                )}
+              </div>
 
-              <section className="border border-white/10 bg-white/3 p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+              {/* Visible Zones */}
+              <div className="p-4">
+                <p className="mb-2 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
                   Visible Zones
-                </h2>
-                <p className="mt-3 text-sm text-slate-400">
-                  Captains can see {snapshot.restrictedZones.length} active
-                  command zones and cannot edit them.
                 </p>
-              </section>
-            </div>
+                <p className="text-xs text-slate-600">
+                  {snapshot.restrictedZones.length} command zone
+                  {snapshot.restrictedZones.length !== 1 ? "s" : ""} — read
+                  only.
+                </p>
+              </div>
+            </>
           )}
         </aside>
       </div>
