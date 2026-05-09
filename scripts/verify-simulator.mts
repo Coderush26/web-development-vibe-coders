@@ -8,7 +8,13 @@ import {
   resolveMovingStatus,
   updateRemainingRoute,
 } from "../lib/simulator/core.ts";
-import { bearingDegrees, haversineDistanceKm, movePosition, pointInPolygon } from "../lib/geo.ts";
+import {
+  bearingDegrees,
+  haversineDistanceKm,
+  isNavigableWaterPoint,
+  movePosition,
+  segmentStaysInNavigableWater,
+} from "../lib/geo.ts";
 import type { FleetSeed, LatLng, ShipState } from "../lib/domain.ts";
 import { readFileSync } from "node:fs";
 
@@ -108,6 +114,23 @@ assert(
 const fleetSeed = JSON.parse(readFileSync("public/fleet.json", "utf8")) as FleetSeed;
 assert(fleetSeed.fleet.length === 15, "Canonical fleet seed must contain exactly 15 ships.");
 
+assert(
+  !segmentStaysInNavigableWater([24.55, 56.9], [25.25, 56.15], fleetSeed.navigableWater),
+  "Routes from Sohar toward the Gulf must not cut across the UAE/Oman landmass.",
+);
+assert(
+  !segmentStaysInNavigableWater([24.56, 56.9], [25.6, 56.55], fleetSeed.navigableWater),
+  "Routes from Sohar must not cut across the Fujairah/Oman coastal land strip.",
+);
+assert(
+  segmentStaysInNavigableWater([25.55, 56.82], [25.6, 56.55], fleetSeed.navigableWater),
+  "Routes from Sohar should still be able to approach the Strait by open water.",
+);
+assert(
+  segmentStaysInNavigableWater([24.56, 56.9], [24.9, 56.95], fleetSeed.navigableWater),
+  "Routes from Sohar should still be able to depart into the offshore lane.",
+);
+
 const ships: ShipState[] = fleetSeed.fleet.map((ship) => {
   const port = fleetSeed.ports.find((candidate) => candidate.id === ship.destination);
   if (!port) {
@@ -149,7 +172,7 @@ const advancedShips = ships.map((ship) => {
         weatherMultiplier: ship.weatherMultiplier,
       });
   const nextPosition = movePosition(ship.position, heading, movementBudgetKm);
-  const inNavigableWater = pointInPolygon(nextPosition, fleetSeed.navigableWater);
+  const inNavigableWater = isNavigableWaterPoint(nextPosition, fleetSeed.navigableWater);
   const actualDistanceKm = inNavigableWater ? haversineDistanceKm(ship.position, nextPosition) : 0;
   const remainingFuel = ship.fuelTons - calculateFuelBurnTons(actualDistanceKm, ship.weatherMultiplier);
 

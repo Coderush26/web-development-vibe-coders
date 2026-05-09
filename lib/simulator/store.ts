@@ -4,6 +4,7 @@ import {
   bearingDegrees,
   clampToBoundingBox,
   haversineDistanceKm,
+  isNavigableWaterPoint,
   movePosition,
   pointInPolygon,
 } from "@/lib/geo";
@@ -21,7 +22,7 @@ import {
   updateRemainingRoute,
 } from "@/lib/simulator/core";
 import { analyzeDistressMessage, formatDistressAnalysis } from "@/lib/simulator/distress";
-import { computeRoutePlan, routeIntersectsZone } from "@/lib/simulator/routing";
+import { computeRoutePlan, routeIntersectsZone, routeIsNavigable } from "@/lib/simulator/routing";
 import { estimateDirectRoute } from "@/lib/simulator/core";
 import { fetchWeatherSamples } from "@/lib/simulator/weather";
 import type {
@@ -430,9 +431,26 @@ export class SimulatorStore {
 
     const canMove = !isStoppedStatus(ship.status);
     const weatherMultiplier = resolveWeatherMultiplier(ship.position, this.weatherSamples);
+    const currentRouteStillNavigable =
+      ship.currentRoute.valid &&
+      routeIsNavigable({
+        waypoints: ship.currentRoute.waypoints,
+        navigableWater: this.seed.navigableWater,
+        restrictedZones: this.restrictedZones,
+      });
+    const activeRoute = currentRouteStillNavigable
+      ? ship.currentRoute
+      : computeRoutePlan({
+          shipId: ship.id,
+          start: ship.position,
+          destination: destination.position,
+          navigableWater: this.seed.navigableWater,
+          restrictedZones: this.restrictedZones,
+          weatherSamples: this.weatherSamples,
+        });
     const routeWaypoints =
-      ship.currentRoute.valid && ship.currentRoute.waypoints.length >= 2
-        ? ship.currentRoute.waypoints
+      activeRoute.valid && activeRoute.waypoints.length >= 2
+        ? activeRoute.waypoints
         : [ship.position, destination.position];
     const waypointIndex = Math.min(Math.max(1, ship.activeWaypointIndex), routeWaypoints.length - 1);
     const targetWaypoint = routeWaypoints[waypointIndex] ?? destination.position;
@@ -451,7 +469,7 @@ export class SimulatorStore {
       movePosition(ship.position, headingDegrees, distanceKm),
       this.seed.boundingBox,
     );
-    const inNavigableWater = pointInPolygon(movedPosition, this.seed.navigableWater);
+    const inNavigableWater = isNavigableWaterPoint(movedPosition, this.seed.navigableWater);
     const nextPosition = inNavigableWater ? movedPosition : ship.position;
     const actualDistanceKm = inNavigableWater ? distanceKm : 0;
     const fuelBurn = calculateFuelBurnTons(actualDistanceKm, weatherMultiplier);
@@ -461,7 +479,7 @@ export class SimulatorStore {
         ? Math.min(waypointIndex + 1, routeWaypoints.length - 1)
         : waypointIndex;
     const remainingRoute = updateRemainingRoute({
-      route: ship.currentRoute,
+      route: activeRoute,
       currentPosition: nextPosition,
       activeWaypointIndex: nextWaypointIndex,
       fallbackDestination: destination.position,

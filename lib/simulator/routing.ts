@@ -1,4 +1,9 @@
-import { haversineDistanceKm, pointInPolygon } from "@/lib/geo";
+import {
+  haversineDistanceKm,
+  isNavigableWaterPoint,
+  pointInPolygon,
+  segmentStaysInNavigableWater,
+} from "@/lib/geo";
 import { BASE_FUEL_TONS_PER_KM, resolveWeatherMultiplier } from "@/lib/simulator/core";
 import type { LatLng, RestrictedZone, RouteOption, RoutePlan, WeatherSample } from "@/lib/domain";
 
@@ -24,18 +29,6 @@ function uniquePolygonPoints(polygon: LatLng[]): LatLng[] {
     return points.slice(0, -1);
   }
   return points;
-}
-
-function segmentStaysInNavigableWater(a: LatLng, b: LatLng, navigableWater: LatLng[]): boolean {
-  for (let step = 0; step <= SEGMENT_SAMPLES; step += 1) {
-    const t = step / SEGMENT_SAMPLES;
-    const sample: LatLng = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-    if (!pointInPolygon(sample, navigableWater)) {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 function segmentAvoidsRestrictedZones(
@@ -73,7 +66,7 @@ function isSegmentNavigable(
 
 function nearestExitPoint(shipPosition: LatLng, zone: RestrictedZone, navigableWater: LatLng[]): LatLng | null {
   const candidates = uniquePolygonPoints(zone.polygon).filter((point) =>
-    pointInPolygon(point, navigableWater),
+    isNavigableWaterPoint(point, navigableWater),
   );
   if (candidates.length === 0) {
     return null;
@@ -212,6 +205,35 @@ export function routeIntersectsZone(routeWaypoints: LatLng[], zonePolygon: LatLn
   return false;
 }
 
+export function routeIsNavigable(args: {
+  waypoints: LatLng[];
+  navigableWater: LatLng[];
+  restrictedZones: RestrictedZone[];
+}): boolean {
+  if (args.waypoints.length < 2) {
+    return false;
+  }
+
+  const activeZones = args.restrictedZones.filter((zone) => zone.active);
+  const allowedZoneIds = new Set<string>();
+
+  for (let i = 1; i < args.waypoints.length; i += 1) {
+    if (
+      !isSegmentNavigable(
+        args.waypoints[i - 1],
+        args.waypoints[i],
+        args.navigableWater,
+        activeZones,
+        allowedZoneIds,
+      )
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export function computeRoutePlan(args: {
   shipId: string;
   start: LatLng;
@@ -226,7 +248,10 @@ export function computeRoutePlan(args: {
     pointInPolygon(args.destination, zone.polygon),
   );
 
-  if (!pointInPolygon(args.start, args.navigableWater) || !pointInPolygon(args.destination, args.navigableWater)) {
+  if (
+    !isNavigableWaterPoint(args.start, args.navigableWater) ||
+    !isNavigableWaterPoint(args.destination, args.navigableWater)
+  ) {
     return {
       shipId: args.shipId,
       waypoints: [args.start, args.destination],
@@ -257,14 +282,16 @@ export function computeRoutePlan(args: {
 
   activeZones.forEach((zone, zoneIndex) => {
     uniquePolygonPoints(zone.polygon).forEach((point, pointIndex) => {
-      if (pointInPolygon(point, args.navigableWater)) {
+      if (isNavigableWaterPoint(point, args.navigableWater)) {
         nodes.push({ id: `zone-${zoneIndex}-p-${pointIndex}`, position: point });
       }
     });
   });
 
   uniquePolygonPoints(args.navigableWater).forEach((point, index) => {
-    nodes.push({ id: `nav-${index}`, position: point });
+    if (isNavigableWaterPoint(point, args.navigableWater)) {
+      nodes.push({ id: `nav-${index}`, position: point });
+    }
   });
 
   // Interior waypoints for the Strait of Hormuz channel — the navigable
@@ -283,6 +310,9 @@ export function computeRoutePlan(args: {
     [25.90, 56.75], // Gulf of Oman south
 
     // ── South channel through the Strait (below Musandam peninsula) ──────
+    [24.90, 56.95], // Sohar offshore departure lane
+    [25.25, 56.95], // Gulf of Oman coastal-safe lane
+    [25.55, 56.82], // approach to southern Hormuz channel
     [25.60, 55.95], // south channel approach from west
     [25.55, 56.25], // south channel mid (below Musandam zone)
     [25.60, 56.55], // south channel east (clear of Musandam)
@@ -305,7 +335,9 @@ export function computeRoutePlan(args: {
     [26.90, 54.55], // north-east of Farsi zone
   ];
   interiorNodes.forEach((point, index) => {
-    nodes.push({ id: `interior-${index}`, position: point });
+    if (isNavigableWaterPoint(point, args.navigableWater)) {
+      nodes.push({ id: `interior-${index}`, position: point });
+    }
   });
 
   if (startInsideZones.length > 0) {
@@ -405,8 +437,8 @@ function computeRoutePlanWithCostWeight(
   );
 
   if (
-    !pointInPolygon(args.start, args.navigableWater) ||
-    !pointInPolygon(args.destination, args.navigableWater) ||
+    !isNavigableWaterPoint(args.start, args.navigableWater) ||
+    !isNavigableWaterPoint(args.destination, args.navigableWater) ||
     destinationInsideBlockedZone
   ) {
     return computeRoutePlan(args);
@@ -419,26 +451,31 @@ function computeRoutePlanWithCostWeight(
 
   activeZones.forEach((zone, zoneIndex) => {
     uniquePolygonPoints(zone.polygon).forEach((point, pointIndex) => {
-      if (pointInPolygon(point, args.navigableWater)) {
+      if (isNavigableWaterPoint(point, args.navigableWater)) {
         nodes.push({ id: `zone-${zoneIndex}-p-${pointIndex}`, position: point });
       }
     });
   });
 
   uniquePolygonPoints(args.navigableWater).forEach((point, index) => {
-    nodes.push({ id: `nav-${index}`, position: point });
+    if (isNavigableWaterPoint(point, args.navigableWater)) {
+      nodes.push({ id: `nav-${index}`, position: point });
+    }
   });
 
   const interiorNodes: LatLng[] = [
     [26.50, 56.00], [26.45, 56.25], [26.42, 56.50], [26.38, 56.75],
     [26.30, 56.55], [26.20, 56.62], [26.10, 56.70], [25.90, 56.75],
+    [24.90, 56.95], [25.25, 56.95], [25.55, 56.82],
     [25.60, 55.95], [25.55, 56.25], [25.60, 56.55],
     [26.60, 56.00], [26.75, 56.50], [26.75, 57.00],
     [26.10, 54.80], [26.10, 55.30], [25.60, 54.80], [25.60, 55.30],
     [26.20, 53.75], [26.20, 54.55], [26.90, 53.75], [26.90, 54.55],
   ];
   interiorNodes.forEach((point, index) => {
-    nodes.push({ id: `interior-${index}`, position: point });
+    if (isNavigableWaterPoint(point, args.navigableWater)) {
+      nodes.push({ id: `interior-${index}`, position: point });
+    }
   });
 
   if (startInsideZones.length > 0) {
