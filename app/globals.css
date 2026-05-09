@@ -117,26 +117,6 @@ button:disabled {
   animation: live-ring 1.6s ease-out infinite;
 }
 
-@keyframes scanline {
-  0%   { background-position: 0 0; }
-  100% { background-position: 0 100px; }
-}
-
-.map-scanlines::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    to bottom,
-    transparent 0px,
-    transparent 3px,
-    rgba(0,0,0,0.08) 3px,
-    rgba(0,0,0,0.08) 4px
-  );
-  animation: scanline 8s linear infinite;
-}
-
 .fuel-bar-track {
   height: 4px;
   background: rgba(255,255,255,0.1);

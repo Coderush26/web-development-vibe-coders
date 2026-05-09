@@ -30,7 +30,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Restricted zones need at least three [lat,lng] points." }, { status: 400 });
   }
 
-  const snapshot = getSimulatorStore().dispatch({
+  const snapshot = await getSimulatorStore().dispatch({
     type: "create_zone",
     name: body.name ?? "Restricted Zone",
     polygon: body.polygon,
@@ -43,6 +43,8 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
   let body: {
     zoneId?: string;
     active?: boolean;
+    name?: string;
+    polygon?: unknown[];
   };
 
   try {
@@ -51,11 +53,30 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  if (!body.zoneId || typeof body.active !== "boolean") {
-    return NextResponse.json({ error: "Missing zoneId or active flag." }, { status: 400 });
+  if (!body.zoneId) {
+    return NextResponse.json({ error: "Missing zoneId." }, { status: 400 });
   }
 
-  const snapshot = getSimulatorStore().dispatch({
+  if (body.polygon) {
+    if (body.polygon.length < 3 || !body.polygon.every(isLatLng)) {
+      return NextResponse.json({ error: "Restricted zones need at least three [lat,lng] points." }, { status: 400 });
+    }
+
+    const snapshot = await getSimulatorStore().dispatch({
+      type: "update_zone",
+      zoneId: body.zoneId,
+      name: body.name,
+      polygon: body.polygon,
+    });
+
+    return NextResponse.json(snapshot);
+  }
+
+  if (typeof body.active !== "boolean") {
+    return NextResponse.json({ error: "Missing active flag or polygon update." }, { status: 400 });
+  }
+
+  const snapshot = await getSimulatorStore().dispatch({
     type: "set_zone_active",
     zoneId: body.zoneId,
     active: body.active,

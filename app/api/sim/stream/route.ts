@@ -13,8 +13,13 @@ export function GET(request: Request): Response {
 
   const stream = new ReadableStream({
     start(controller) {
+      let hasSentInitialSnapshot = false;
       const send = (snapshot: SimulatorSnapshot) => {
-        if (Number.isFinite(lastEventId) && snapshot.stateVersion <= lastEventId) {
+        if (
+          hasSentInitialSnapshot &&
+          Number.isFinite(lastEventId) &&
+          snapshot.stateVersion <= lastEventId
+        ) {
           return;
         }
 
@@ -30,6 +35,7 @@ export function GET(request: Request): Response {
             `id: ${event.eventId}\nretry: 2000\nevent: snapshot\ndata: ${JSON.stringify(event)}\n\n`,
           ),
         );
+        hasSentInitialSnapshot = true;
       };
 
       const unsubscribe = store.subscribe(send);

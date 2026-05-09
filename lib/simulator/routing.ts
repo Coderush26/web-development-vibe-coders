@@ -8,6 +8,7 @@ type GraphNode = {
 };
 
 const SEGMENT_SAMPLES = 24;
+const WEATHER_COST_WEIGHT = 0.45;
 
 function uniquePolygonPoints(polygon: LatLng[]): LatLng[] {
   const points = polygon.slice();
@@ -150,6 +151,36 @@ function estimateRouteFuel(distanceKm: number, weatherMultiplier = 1): number {
   return distanceKm * BASE_FUEL_TONS_PER_KM * weatherMultiplier;
 }
 
+function segmentWeatherMultiplier(
+  a: LatLng,
+  b: LatLng,
+  weatherSamples: WeatherSample[],
+): number {
+  if (weatherSamples.length === 0) {
+    return 1;
+  }
+
+  let total = 0;
+  for (let step = 0; step <= SEGMENT_SAMPLES; step += 1) {
+    const t = step / SEGMENT_SAMPLES;
+    const sample: LatLng = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    total += resolveWeatherMultiplier(sample, weatherSamples);
+  }
+
+  return total / (SEGMENT_SAMPLES + 1);
+}
+
+function segmentRouteCostKm(
+  a: LatLng,
+  b: LatLng,
+  weatherSamples: WeatherSample[],
+): number {
+  const distanceKm = haversineDistanceKm(a, b);
+  const weatherMultiplier = segmentWeatherMultiplier(a, b, weatherSamples);
+
+  return distanceKm * (1 + (weatherMultiplier - 1) * WEATHER_COST_WEIGHT);
+}
+
 function routeHasAdverseWeather(waypoints: LatLng[], weatherSamples: WeatherSample[]): boolean {
   if (weatherSamples.length === 0) return false;
   return waypoints.some((pt) => resolveWeatherMultiplier(pt, weatherSamples) > 1);
@@ -280,7 +311,7 @@ export function computeRoutePlan(args: {
           allowStartEscape,
         )
       ) {
-        const weight = haversineDistanceKm(a.position, b.position);
+        const weight = segmentRouteCostKm(a.position, b.position, args.weatherSamples ?? []);
         if (!edges.has(a.id)) {
           edges.set(a.id, []);
         }

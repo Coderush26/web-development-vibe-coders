@@ -29,7 +29,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid directive payload." }, { status: 400 });
   }
 
-  const snapshot = getSimulatorStore().dispatch({
+  const snapshot = await getSimulatorStore().dispatch({
     type: "issue_directive",
     targetShipId: body.targetShipId,
     directiveType: body.directiveType,

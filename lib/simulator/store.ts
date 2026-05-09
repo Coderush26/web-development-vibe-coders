@@ -20,6 +20,7 @@ import {
   SIM_TICK_MS,
   updateRemainingRoute,
 } from "@/lib/simulator/core";
+import { analyzeDistressMessage, formatDistressAnalysis } from "@/lib/simulator/distress";
 import { computeRoutePlan, routeIntersectsZone } from "@/lib/simulator/routing";
 import { fetchWeatherSamples } from "@/lib/simulator/weather";
 import type {
@@ -28,7 +29,6 @@ import type {
   CaptainResponse,
   Directive,
   DirectiveType,
-  DistressAnalysis,
   HistorySnapshot,
   LatLng,
   RestrictedZone,
@@ -45,55 +45,6 @@ const WEATHER_REFRESH_MS = 10 * 60 * 1000;
 
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function analyzeDistressMessage(message: string): DistressAnalysis {
-  const normalized = message.toLowerCase();
-  const impacts: Record<string, number | string> = {};
-  const numberMatch = normalized.match(/\b(\d{1,4})\b/);
-
-  if (numberMatch) {
-    impacts.reportedCount = Number(numberMatch[1]);
-  }
-
-  const category =
-    normalized.includes("fire") || normalized.includes("burn")
-      ? "fire"
-      : normalized.includes("engine") || normalized.includes("propulsion")
-        ? "engine_failure"
-        : normalized.includes("flood") || normalized.includes("water")
-          ? "flooding"
-          : normalized.includes("injur") || normalized.includes("medical")
-            ? "medical"
-            : normalized.includes("cargo") || normalized.includes("spill")
-              ? "cargo_damage"
-              : "unknown";
-
-  const severity: AlertSeverity =
-    normalized.includes("mayday") ||
-    normalized.includes("critical") ||
-    normalized.includes("fire") ||
-    normalized.includes("sinking") ||
-    normalized.includes("explosion")
-      ? "critical"
-      : normalized.includes("urgent") ||
-          normalized.includes("injur") ||
-          normalized.includes("engine") ||
-          normalized.includes("flood")
-        ? "warning"
-        : "info";
-
-  if (category !== "unknown") {
-    impacts.problem = category;
-  }
-
-  return {
-    severity,
-    problemCategory: category,
-    impacts,
-    confidence: category === "unknown" ? 0.45 : 0.78,
-    source: "local_rules",
-  };
 }
 
 export class SimulatorStore {
@@ -225,17 +176,21 @@ export class SimulatorStore {
     };
   }
 
-  dispatch(command: SimulatorCommand): SimulatorSnapshot {
+  async dispatch(command: SimulatorCommand): Promise<SimulatorSnapshot> {
     if (command.type === "issue_directive") {
       this.issueDirective(command.targetShipId, command.directiveType, command.payload);
     }
 
     if (command.type === "captain_response") {
-      this.recordCaptainResponse(command.directiveId, command.responseType, command.distressMessage);
+      await this.recordCaptainResponse(command.directiveId, command.responseType, command.distressMessage);
     }
 
     if (command.type === "create_zone") {
       this.createRestrictedZone(command.name, command.polygon);
+    }
+
+    if (command.type === "update_zone") {
+      this.updateRestrictedZone(command.zoneId, command.name, command.polygon);
     }
 
     if (command.type === "set_zone_active") {
@@ -445,11 +400,11 @@ export class SimulatorStore {
     this.keyEvents.push(`Directive ${directiveType} issued to ${ship.name}.`);
   }
 
-  private recordCaptainResponse(
+  private async recordCaptainResponse(
     directiveId: string,
     responseType: "ACCEPT" | "ESCALATE_DISTRESS",
     distressMessage?: string,
-  ): void {
+  ): Promise<void> {
     const directive = this.directives.find((candidate) => candidate.id === directiveId);
 
     if (!directive) {
@@ -462,15 +417,16 @@ export class SimulatorStore {
       return;
     }
 
+    const normalizedDistressMessage = distressMessage?.trim();
     const distressAnalysis =
-      responseType === "ESCALATE_DISTRESS" && distressMessage
-        ? analyzeDistressMessage(distressMessage)
+      responseType === "ESCALATE_DISTRESS" && normalizedDistressMessage
+        ? await analyzeDistressMessage(normalizedDistressMessage)
         : undefined;
     const response: CaptainResponse = {
       directiveId,
       shipId: ship.id,
       responseType,
-      distressMessage,
+      distressMessage: normalizedDistressMessage,
       distressAnalysis,
       respondedAt: Date.now(),
     };
@@ -489,7 +445,11 @@ export class SimulatorStore {
         "distress_escalation",
         distressAnalysis?.severity ?? "warning",
         [ship.id],
-        `${ship.name} escalated distress: ${distressMessage ?? "No details supplied."}`,
+        `${ship.name} escalated distress: ${
+          normalizedDistressMessage ?? "No details supplied."
+        }${
+          distressAnalysis ? ` (${formatDistressAnalysis(distressAnalysis)})` : ""
+        }`,
         `distress:${directive.id}`,
       );
       this.keyEvents.push(`${ship.name} escalated distress.`);
@@ -600,6 +560,57 @@ export class SimulatorStore {
         return this.recomputeRouteForShip(
           { ...ship, status: "rerouting" },
           `${ship.name} route intersects ${zone.name}; auto-rerouting.`,
+        );
+      }
+
+      return ship;
+    });
+  }
+
+  private updateRestrictedZone(zoneId: string, name: string | undefined, polygon: LatLng[]): void {
+    if (polygon.length < 3) {
+      return;
+    }
+
+    const zone = this.restrictedZones.find((candidate) => candidate.id === zoneId);
+
+    if (!zone || !zone.editable) {
+      return;
+    }
+
+    zone.name = name?.trim() || zone.name;
+    zone.polygon = polygon;
+    zone.updatedAt = Date.now();
+    this.keyEvents.push(`${zone.name} polygon updated.`);
+
+    if (!zone.active) {
+      return;
+    }
+
+    this.ships = this.ships.map((ship) => {
+      const breachSourceId = this.breachSourceId(ship.id, zone.id);
+
+      if (pointInPolygon(ship.position, polygon)) {
+        this.upsertAlert(
+          "restricted_zone_breach",
+          "critical",
+          [ship.id],
+          `${ship.name} is inside edited zone ${zone.name}.`,
+          breachSourceId,
+        );
+
+        return this.recomputeRouteForShip(
+          { ...ship, status: "rerouting" },
+          `${ship.name} forced reroute after ${zone.name} edit.`,
+        );
+      }
+
+      this.resolveAlert(breachSourceId);
+
+      if (routeIntersectsZone(ship.currentRoute.waypoints, polygon)) {
+        return this.recomputeRouteForShip(
+          { ...ship, status: "rerouting" },
+          `${ship.name} route intersects edited ${zone.name}; auto-rerouting.`,
         );
       }
 

@@ -26,19 +26,23 @@ corepack pnpm dev
 | `/api/sim/snapshot` | GET | One-shot snapshot of current simulator state |
 | `/api/sim/directives` | POST | Command issues a directive to a ship |
 | `/api/sim/responses` | POST | Captain accepts or escalates a directive |
-| `/api/sim/zones` | POST | Command creates or toggles a restricted zone |
+| `/api/sim/zones` | POST | Command creates a restricted zone |
+| `/api/sim/zones` | PATCH | Command toggles or edits an existing restricted-zone polygon |
 | `/api/sim/alerts/ack` | POST | Acknowledges an active alert |
 | `/api/sim/weather` | POST | Triggers an immediate weather refresh from Open-Meteo |
 
 ## Environment Variables and API Keys
 
-No API keys are required. Weather data is fetched from the [Open-Meteo](https://open-meteo.com/) free tier (no key needed).
+Weather data is fetched from the [Open-Meteo](https://open-meteo.com/) free tier — no key needed.
 
-Optional environment variables:
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `XAI_API_KEY` | Optional | Enables Grok (`grok-latest`) AI distress analysis. Falls back to local rules if unset or if the API call fails. |
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| _(none required)_ | — | All defaults are production-ready for local judging |
+Set in `.env.local`:
+```
+XAI_API_KEY=your_key_here
+```
 
 ## Weather
 
@@ -52,15 +56,26 @@ Weather is fetched from Open-Meteo across a 14-point grid covering the Persian G
 - Wind speed ≥ 15 m/s (~30 knots), OR
 - Wave height ≥ 2 m
 
-Adverse weather applies a **1.3× fuel multiplier** (30% extra burn) to any ship moving through that region. Weather does not trigger rerouting on its own — it affects fuel cost when a route is computed for another reason.
+Adverse weather applies a **1.3× fuel multiplier** (30% extra burn) to any ship moving through that region. Weather does not trigger rerouting on its own — it affects fuel cost when a route is computed for another reason, and the route graph weights adverse segments higher so reroutes prefer lower-risk weather corridors when alternatives exist.
+
+## Distress Analysis
+
+Captain users can escalate a pending directive with free-form distress text. The simulator calls **Grok** (`grok-latest` via xAI API) when `XAI_API_KEY` is set, and falls back to deterministic local rules automatically. Either path extracts:
+
+- **Severity:** `info`, `warning`, or `critical`.
+- **Problem category:** fire, engine failure, flooding, medical, cargo damage, or unknown.
+- **Quantified impacts:** injured crew, missing crew, water ingress depth, engine power loss percentage, cargo loss tonnage, or a generic reported count.
+
+Severity is priority-scored from both keywords and quantified impacts. For example, mayday/fire/explosion language, missing crew, 5+ injured crew, 50+ cm water ingress, 75%+ engine power loss, or 100+ tons cargo loss can promote a distress alert to critical. The extracted analysis is stored on the captain response and included in the generated distress alert message.
 
 ## Simulator Features
 
 - **15 ships** loaded from `public/fleet.json` (immutable seed data).
 - **1 Hz tick loop** advances ship positions, burns fuel, and resolves status.
+- **English Esri street-map tile basemap** under the command overlays, with local SVG overlays for ships, ports, routes, weather, and zones.
 - **Fuel burn:** `0.08 tons/km × weather multiplier`. Adverse weather adds 30%.
 - **Ship statuses:** `normal`, `rerouting`, `distressed`, `stopped`, `insufficient_fuel`, `stranded`, `out_of_fuel`, `arrived`.
-- **Dijkstra routing** inside the navigable-water polygon, avoiding active restricted zones. Interior waypoints thread the Strait of Hormuz channel.
+- **Dijkstra routing** inside the navigable-water polygon, avoiding active restricted zones and weighting adverse-weather exposure. Interior waypoints thread the Strait of Hormuz channel.
 - **Auto-reroute** when a new zone intersects a ship's path or surrounds it.
 - **Geofence breach alerts** fire within 1 second of boundary crossing.
 - **Proximity alerts** fire when any two ships come within 2 km.
@@ -77,13 +92,20 @@ Adverse weather applies a **1.3× fuel multiplier** (30% extra burn) to any ship
 ```bash
 pnpm lint
 pnpm build
+pnpm verify:sim
 ```
 
 Manual browser checks: live fleet updates, directive issue → captain accept/escalate, restricted-zone draw → auto-reroute, geofence breach alert → acknowledge, proximity alert, distress analysis, weather overlay, playback scrubbing.
+
+With the dev server already running, verify five simultaneous SSE viewers and the 500 ms p95 latency target:
+
+```bash
+pnpm verify:realtime
+```
 
 ## Assumptions
 
 - `public/fleet.json` is immutable and contains exactly 15 ships, fixed ports, and the navigable-water polygon.
 - Runtime state is in-memory only — restarting the server resets all ships, alerts, zones, directives, and history.
-- Rule-based distress extraction is the local fallback; upgrade to an AI-backed extractor by setting an Anthropic API key and swapping the `analyzeDistressMessage` function in `lib/simulator/store.ts`.
+- Distress analysis uses Grok (`grok-latest` via xAI) when `XAI_API_KEY` is set; automatically falls back to local rules on missing key or API failure.
 - Open-Meteo is the default weather provider. Polling at 10-minute intervals is intentional — the free tier updates hourly, so more frequent polling returns identical data.

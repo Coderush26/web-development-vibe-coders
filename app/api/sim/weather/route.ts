@@ -9,7 +9,7 @@ export async function POST(): Promise<NextResponse> {
   try {
     const samples = await fetchWeatherSamples();
     const store = getSimulatorStore();
-    const snapshot = store.dispatch({ type: "update_weather", samples });
+    const snapshot = await store.dispatch({ type: "update_weather", samples });
     return NextResponse.json({ ok: true, sampleCount: samples.length, snapshot });
   } catch (error) {
     return NextResponse.json({ ok: false, error: String(error) }, { status: 500 });

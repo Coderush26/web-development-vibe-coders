@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { interpolateLatLng } from "@/lib/geo";
 import { Button } from "@/components/ui/button";
 import type {
@@ -14,8 +14,35 @@ import type {
 
 const MAP_WIDTH = 1000;
 const MAP_HEIGHT = 620;
+const TILE_ZOOM = 7;
 
 type Role = "command" | "captain";
+
+function lngToTileX(lng: number, zoom: number): number {
+  return Math.floor(((lng + 180) / 360) * 2 ** zoom);
+}
+
+function latToTileY(lat: number, zoom: number): number {
+  const latRad = (lat * Math.PI) / 180;
+  return Math.floor(
+    ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) *
+      2 ** zoom,
+  );
+}
+
+function tileXToLng(x: number, zoom: number): number {
+  return (x / 2 ** zoom) * 360 - 180;
+}
+
+function tileYToLat(y: number, zoom: number): number {
+  const n = Math.PI - (2 * Math.PI * y) / 2 ** zoom;
+  return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+
+function mercatorY(lat: number): number {
+  const latRad = (lat * Math.PI) / 180;
+  return Math.log(Math.tan(Math.PI / 4 + latRad / 2));
+}
 
 const directiveLabels: Record<DirectiveType, string> = {
   HOLD_POSITION: "Hold",
@@ -120,8 +147,12 @@ export default function Page() {
   const latestVersionRef = useRef(-1);
   const svgRef = useRef<SVGSVGElement>(null);
   const [drawingMode, setDrawingMode] = useState(false);
+  const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
   const [draftPolygon, setDraftPolygon] = useState<LatLng[]>([]);
   const [mouseMapPos, setMouseMapPos] = useState<[number, number] | null>(null);
+  const [draggedVertexIndex, setDraggedVertexIndex] = useState<number | null>(null);
+  const [mapZoom, setMapZoom] = useState(1);
+  const [mapPan, setMapPan] = useState<[number, number]>([0, 0]);
   const seenCriticalAlertIdsRef = useRef<Set<string>>(new Set());
   const audioContextRef = useRef<AudioContext | null>(null);
 
@@ -311,23 +342,63 @@ export default function Page() {
       : snapshot?.alerts.filter(
           (alert) => !alert.resolvedAt && !alert.acknowledgedAt,
         )) ?? [];
-
-  function project(point: LatLng): [number, number] {
+  const project = useCallback((point: LatLng): [number, number] => {
     if (!snapshot) {
       return [0, 0];
     }
 
     const { boundingBox } = snapshot;
+    const northY = mercatorY(boundingBox.north);
+    const southY = mercatorY(boundingBox.south);
     const x =
       ((point[1] - boundingBox.west) / (boundingBox.east - boundingBox.west)) *
       MAP_WIDTH;
-    const y =
-      ((boundingBox.north - point[0]) /
-        (boundingBox.north - boundingBox.south)) *
-      MAP_HEIGHT;
+    const y = ((northY - mercatorY(point[0])) / (northY - southY)) * MAP_HEIGHT;
 
     return [x, y];
-  }
+  }, [snapshot]);
+
+  const mapTiles = useMemo(() => {
+    if (!snapshot) {
+      return [];
+    }
+
+    const { boundingBox } = snapshot;
+    const minX = lngToTileX(boundingBox.west, TILE_ZOOM);
+    const maxX = lngToTileX(boundingBox.east, TILE_ZOOM);
+    const minY = latToTileY(boundingBox.north, TILE_ZOOM);
+    const maxY = latToTileY(boundingBox.south, TILE_ZOOM);
+    const tiles: Array<{
+      key: string;
+      url: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }> = [];
+
+    for (let x = minX; x <= maxX; x += 1) {
+      for (let y = minY; y <= maxY; y += 1) {
+        const west = tileXToLng(x, TILE_ZOOM);
+        const east = tileXToLng(x + 1, TILE_ZOOM);
+        const north = tileYToLat(y, TILE_ZOOM);
+        const south = tileYToLat(y + 1, TILE_ZOOM);
+        const [left, top] = project([north, west]);
+        const [right, bottom] = project([south, east]);
+
+        tiles.push({
+          key: `${TILE_ZOOM}-${x}-${y}`,
+          url: `https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/${TILE_ZOOM}/${y}/${x}`,
+          x: left,
+          y: top,
+          width: right - left,
+          height: bottom - top,
+        });
+      }
+    }
+
+    return tiles;
+  }, [project, snapshot]);
 
   // Compute a tight viewBox around the actual content so the map fills the panel.
   const { mapViewBox, mapOriginX, mapOriginY } = useMemo(() => {
@@ -337,30 +408,33 @@ export default function Page() {
         mapOriginX: 0,
         mapOriginY: 0,
       };
-    const { boundingBox } = snapshot;
-    const px = (pt: LatLng): [number, number] => [
-      ((pt[1] - boundingBox.west) / (boundingBox.east - boundingBox.west)) *
-        MAP_WIDTH,
-      ((boundingBox.north - pt[0]) / (boundingBox.north - boundingBox.south)) *
-        MAP_HEIGHT,
-    ];
+    const px = project;
     const pts: LatLng[] = [
       ...snapshot.navigableWater,
       ...snapshot.ports.map((p) => p.position),
     ];
     const xs = pts.map((p) => px(p)[0]);
     const ys = pts.map((p) => px(p)[1]);
-    const pad = 55;
+    const pad = 110;
     const x0 = Math.max(0, Math.min(...xs) - pad);
     const y0 = Math.max(0, Math.min(...ys) - pad);
     const x1 = Math.min(MAP_WIDTH, Math.max(...xs) + pad);
     const y1 = Math.min(MAP_HEIGHT, Math.max(...ys) + pad);
+    const baseWidth = x1 - x0;
+    const baseHeight = y1 - y0;
+    const width = baseWidth / mapZoom;
+    const height = baseHeight / mapZoom;
+    const centerX = x0 + baseWidth / 2 + mapPan[0];
+    const centerY = y0 + baseHeight / 2 + mapPan[1];
+    const vx = Math.max(0, Math.min(MAP_WIDTH - width, centerX - width / 2));
+    const vy = Math.max(0, Math.min(MAP_HEIGHT - height, centerY - height / 2));
+
     return {
-      mapViewBox: `${x0 | 0} ${y0 | 0} ${(x1 - x0) | 0} ${(y1 - y0) | 0}`,
-      mapOriginX: x0,
-      mapOriginY: y0,
+      mapViewBox: `${vx | 0} ${vy | 0} ${width | 0} ${height | 0}`,
+      mapOriginX: vx,
+      mapOriginY: vy,
     };
-  }, [snapshot]);
+  }, [mapPan, mapZoom, project, snapshot]);
 
   async function issueDirective(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -417,7 +491,10 @@ export default function Page() {
 
   function unproject(x: number, y: number): LatLng {
     const bb = snapshot!.boundingBox;
-    const lat = bb.north - (y / MAP_HEIGHT) * (bb.north - bb.south);
+    const northY = mercatorY(bb.north);
+    const southY = mercatorY(bb.south);
+    const projectedY = northY - (y / MAP_HEIGHT) * (northY - southY);
+    const lat = (180 / Math.PI) * (2 * Math.atan(Math.exp(projectedY)) - Math.PI / 2);
     const lng = bb.west + (x / MAP_WIDTH) * (bb.east - bb.west);
     return [lat, lng];
   }
@@ -436,7 +513,7 @@ export default function Page() {
   }
 
   function handleMapClick(e: React.MouseEvent<SVGSVGElement>) {
-    if (!drawingMode || inPlayback || !snapshot) return;
+    if (!drawingMode || editingZoneId || inPlayback || !snapshot || draggedVertexIndex !== null) return;
     const pt = getSvgPoint(e);
     if (!pt) return;
     if (draftPolygon.length >= 3) {
@@ -450,26 +527,80 @@ export default function Page() {
   }
 
   function handleMapMouseMove(e: React.MouseEvent<SVGSVGElement>) {
-    if (!drawingMode) return;
-    setMouseMapPos(getSvgPoint(e));
+    if (!drawingMode && !editingZoneId) return;
+    const pt = getSvgPoint(e);
+    setMouseMapPos(pt);
+
+    if (draggedVertexIndex !== null && pt) {
+      setDraftPolygon((prev) =>
+        prev.map((point, index) => (index === draggedVertexIndex ? unproject(pt[0], pt[1]) : point)),
+      );
+    }
   }
 
   async function submitDrawnZone() {
-    if (draftPolygon.length < 3) return;
+    if (draftPolygon.length < 3 || !snapshot) return;
     const closed: LatLng[] = [...draftPolygon, draftPolygon[0]];
-    await postJson("/api/sim/zones", {
-      name: `Zone-${new Date().toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
-      polygon: closed,
-    });
+    if (editingZoneId) {
+      const zoneName =
+        snapshot.restrictedZones.find((zone) => zone.id === editingZoneId)?.name ?? "Restricted Zone";
+      await postJson(
+        "/api/sim/zones",
+        {
+          zoneId: editingZoneId,
+          name: zoneName,
+          polygon: closed,
+        },
+        "PATCH",
+      );
+    } else {
+      await postJson("/api/sim/zones", {
+        name: `Zone-${new Date().toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
+        polygon: closed,
+      });
+    }
     setDraftPolygon([]);
     setDrawingMode(false);
+    setEditingZoneId(null);
     setMouseMapPos(null);
   }
 
   function cancelDrawing() {
     setDraftPolygon([]);
     setDrawingMode(false);
+    setEditingZoneId(null);
     setMouseMapPos(null);
+    setDraggedVertexIndex(null);
+  }
+
+  function beginEditZone(zoneId: string) {
+    if (!snapshot) return;
+    const zone = snapshot.restrictedZones.find((candidate) => candidate.id === zoneId);
+    if (!zone) return;
+    const openPolygon =
+      zone.polygon.length > 1 &&
+      zone.polygon[0][0] === zone.polygon[zone.polygon.length - 1][0] &&
+      zone.polygon[0][1] === zone.polygon[zone.polygon.length - 1][1]
+        ? zone.polygon.slice(0, -1)
+        : zone.polygon;
+
+    setDrawingMode(false);
+    setEditingZoneId(zone.id);
+    setDraftPolygon(openPolygon);
+    setSelectedShipId(selectedShipId);
+  }
+
+  function zoomMap(multiplier: number) {
+    setMapZoom((value) => Math.max(1, Math.min(3.2, value * multiplier)));
+  }
+
+  function panMap(dx: number, dy: number) {
+    setMapPan(([x, y]) => [x + dx / mapZoom, y + dy / mapZoom]);
+  }
+
+  function resetMapView() {
+    setMapZoom(1);
+    setMapPan([0, 0]);
   }
 
   if (!snapshot) {
@@ -618,13 +749,13 @@ export default function Page() {
         </aside>
 
         {/* ── Map ── */}
-        <section className="map-scanlines bg-[#061018] flex flex-col">
+        <section className="bg-[#061018] flex flex-col">
           <svg
             className="w-full"
             style={{
               minHeight: 260,
               flex: "1 1 0%",
-              cursor: drawingMode ? "crosshair" : "default",
+              cursor: drawingMode ? "crosshair" : editingZoneId ? "grab" : "default",
             }}
             viewBox={mapViewBox}
             role="img"
@@ -632,7 +763,11 @@ export default function Page() {
             ref={svgRef}
             onClick={handleMapClick}
             onMouseMove={handleMapMouseMove}
-            onMouseLeave={() => setMouseMapPos(null)}
+            onMouseUp={() => setDraggedVertexIndex(null)}
+            onMouseLeave={() => {
+              setMouseMapPos(null);
+              setDraggedVertexIndex(null);
+            }}
           >
             <defs>
               <pattern
@@ -648,10 +783,6 @@ export default function Page() {
                   strokeWidth="1"
                 />
               </pattern>
-              <radialGradient id="mapVignette" cx="50%" cy="50%" r="70%">
-                <stop offset="0%" stopColor="transparent" />
-                <stop offset="100%" stopColor="rgba(5,13,18,0.6)" />
-              </radialGradient>
               <filter id="glow">
                 <feGaussianBlur stdDeviation="2" result="blur" />
                 <feMerge>
@@ -662,26 +793,21 @@ export default function Page() {
             </defs>
 
             <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="#061822" />
-            <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="url(#grid)" />
-
-            {/* Navigable bounds (operating area bounding box) */}
-            {(() => {
-              const bb = snapshot.boundingBox;
-              const [x0, y0] = project([bb.north, bb.west]);
-              const [x1, y1] = project([bb.south, bb.east]);
-              return (
-                <rect
-                  fill="none"
-                  height={y1 - y0}
-                  stroke="rgba(251,191,36,0.55)"
-                  strokeDasharray="12 6"
-                  strokeWidth="1.5"
-                  width={x1 - x0}
-                  x={x0}
-                  y={y0}
+            <g opacity="0.72">
+              {mapTiles.map((tile) => (
+                <image
+                  height={tile.height}
+                  href={tile.url}
+                  key={tile.key}
+                  preserveAspectRatio="none"
+                  width={tile.width}
+                  x={tile.x}
+                  y={tile.y}
                 />
-              );
-            })()}
+              ))}
+            </g>
+            <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="rgba(3,10,15,0.10)" />
+            <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="url(#grid)" opacity="0.55" />
 
             {/* Navigable water */}
             <polygon
@@ -694,32 +820,34 @@ export default function Page() {
             />
 
             {/* Restricted zones */}
-            {snapshot.restrictedZones.map((zone) => (
-              <polygon
-                fill="rgba(239,68,68,0.15)"
-                key={zone.id}
-                points={zone.polygon.map((p) => project(p).join(",")).join(" ")}
-                stroke="rgba(248,113,113,0.85)"
-                strokeDasharray="8 5"
-                strokeWidth="2"
-              />
+            {snapshot.restrictedZones
+              .filter((zone) => zone.id !== editingZoneId)
+              .map((zone) => (
+                <polygon
+                  fill="rgba(239,68,68,0.15)"
+                  key={zone.id}
+                  points={zone.polygon.map((p) => project(p).join(",")).join(" ")}
+                  stroke="rgba(248,113,113,0.85)"
+                  strokeDasharray="8 5"
+                  strokeWidth="2"
+                />
             ))}
 
             {/* Zone draw overlay */}
-            {drawingMode && (
+            {(drawingMode || editingZoneId) && (
               <g>
                 {draftPolygon.length > 1 && (
-                  <polyline
-                    fill="none"
+                  <polygon
+                    fill={editingZoneId ? "rgba(251,191,36,0.13)" : "none"}
                     points={draftPolygon
                       .map((p) => project(p).join(","))
                       .join(" ")}
-                    stroke="rgba(239,68,68,0.85)"
+                    stroke={editingZoneId ? "rgba(251,191,36,0.9)" : "rgba(239,68,68,0.85)"}
                     strokeDasharray="6 3"
                     strokeWidth="2"
                   />
                 )}
-                {mouseMapPos && draftPolygon.length > 0 && (
+                {drawingMode && mouseMapPos && draftPolygon.length > 0 && (
                   <line
                     stroke="rgba(239,68,68,0.45)"
                     strokeDasharray="4 3"
@@ -744,7 +872,12 @@ export default function Page() {
                       r={isFirst ? 9 : 5}
                       stroke="white"
                       strokeWidth="1.5"
-                      style={isFirst ? { cursor: "pointer" } : undefined}
+                      onMouseDown={(event) => {
+                        if (!editingZoneId) return;
+                        event.stopPropagation();
+                        setDraggedVertexIndex(i);
+                      }}
+                      style={{ cursor: editingZoneId ? "grab" : isFirst ? "pointer" : "default" }}
                     />
                   );
                 })}
@@ -902,7 +1035,7 @@ export default function Page() {
               );
             })}
 
-            {/* North arrow — anchored to top-left of the tight viewBox */}
+            {/* North arrow - anchored to top-left of the tight viewBox */}
             <g transform={`translate(${mapOriginX + 28},${mapOriginY + 28})`}>
               <circle
                 cx="0"
@@ -925,17 +1058,23 @@ export default function Page() {
               </text>
             </g>
 
-            {/* Vignette overlay */}
-            <rect
-              width={MAP_WIDTH}
-              height={MAP_HEIGHT}
-              fill="url(#mapVignette)"
-              style={{ pointerEvents: "none" }}
-            />
+            <g transform={`translate(${mapOriginX + 18},${mapOriginY + 64})`}>
+              <rect
+                fill="rgba(5,13,18,0.72)"
+                height="18"
+                rx="2"
+                stroke="rgba(148,163,184,0.18)"
+                width="122"
+              />
+              <text fill="rgba(226,232,240,0.68)" fontSize="9" x="7" y="12">
+                Tiles: Esri
+              </text>
+            </g>
+
           </svg>
 
           {/* Map status bar */}
-          <div className="flex shrink-0 items-center gap-0 border-t border-white/6 bg-black/40 text-[10px] text-slate-500 uppercase tracking-wider backdrop-blur-sm">
+          <div className="flex shrink-0 flex-wrap items-center gap-0 border-t border-white/6 bg-black/40 text-[10px] text-slate-500 uppercase tracking-wider backdrop-blur-sm">
             <span className="border-r border-white/6 px-3 py-2 text-emerald-400">
               ● SSE 1Hz
             </span>
@@ -958,6 +1097,29 @@ export default function Page() {
             >
               {activeAlerts.length} alerts
             </span>
+            <div className="ml-auto flex items-center border-l border-white/6">
+              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => panMap(-45, 0)} type="button">
+                W
+              </button>
+              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => panMap(0, -45)} type="button">
+                N
+              </button>
+              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => panMap(0, 45)} type="button">
+                S
+              </button>
+              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => panMap(45, 0)} type="button">
+                E
+              </button>
+              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => zoomMap(1.2)} type="button">
+                +
+              </button>
+              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => zoomMap(1 / 1.2)} type="button">
+                -
+              </button>
+              <button className="px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={resetMapView} type="button">
+                Reset
+              </button>
+            </div>
           </div>
         </section>
 
@@ -1155,6 +1317,31 @@ export default function Page() {
                         </Button>
                       </div>
                     </div>
+                  ) : editingZoneId ? (
+                    <div className="space-y-1.5">
+                      <p className="text-center text-[10px] text-amber-300">
+                        Drag zone vertices, then save the edited polygon.
+                      </p>
+                      <div className="flex gap-1.5">
+                        <Button
+                          className="flex-1 text-xs"
+                          disabled={draftPolygon.length < 3}
+                          onClick={submitDrawnZone}
+                          type="button"
+                          variant="destructive"
+                        >
+                          Save Edit
+                        </Button>
+                        <Button
+                          className="flex-1 text-xs"
+                          onClick={cancelDrawing}
+                          type="button"
+                          variant="outline"
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
                   ) : (
                     <div className="flex gap-1.5">
                       <Button
@@ -1193,7 +1380,7 @@ export default function Page() {
                   <div className="space-y-2">
                     {snapshot.restrictedZones.map((zone) => (
                       <div
-                        className="flex items-center justify-between border border-white/8 p-2"
+                        className="flex items-center justify-between gap-2 border border-white/8 p-2"
                         key={zone.id}
                       >
                         <div>
@@ -1210,6 +1397,15 @@ export default function Page() {
                           variant="outline"
                         >
                           {zone.active ? "Deactivate" : "Activate"}
+                        </Button>
+                        <Button
+                          disabled={inPlayback}
+                          onClick={() => beginEditZone(zone.id)}
+                          size="sm"
+                          type="button"
+                          variant={editingZoneId === zone.id ? "default" : "outline"}
+                        >
+                          Edit
                         </Button>
                       </div>
                     ))}
@@ -1342,8 +1538,13 @@ export default function Page() {
                       <textarea
                         className="h-20 w-full border border-white/8 bg-black/20 p-2 text-xs text-slate-200 focus:border-cyan-400/40 focus:outline-none"
                         onChange={(e) => setDistressMessage(e.target.value)}
+                        placeholder="Describe injuries, fire, flooding, engine loss, cargo spill, or other impact."
                         value={distressMessage}
                       />
+                      <p className="mt-1 text-[10px] leading-snug text-slate-600">
+                        Escalation extracts severity, category, and quantified
+                        impact for alert priority.
+                      </p>
                       <div className="mt-2 grid grid-cols-2 gap-2">
                         <Button
                           className="w-full text-xs uppercase tracking-wider bg-emerald-400 text-slate-950 hover:bg-emerald-300"

@@ -34,7 +34,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Directive is not scoped to this captain ship." }, { status: 403 });
   }
 
-  const snapshot = getSimulatorStore().dispatch({
+  const snapshot = await getSimulatorStore().dispatch({
     type: "captain_response",
     directiveId: body.directiveId,
     responseType: body.responseType,

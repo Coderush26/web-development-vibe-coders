@@ -19,7 +19,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Missing alertId." }, { status: 400 });
   }
 
-  const snapshot = getSimulatorStore().dispatch({
+  const snapshot = await getSimulatorStore().dispatch({
     type: "ack_alert",
     alertId: body.alertId,
   });

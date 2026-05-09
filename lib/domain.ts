@@ -134,7 +134,7 @@ export type DistressAnalysis = {
   problemCategory: string;
   impacts: Record<string, number | string>;
   confidence: number;
-  source: "local_rules";
+  source: "local_rules" | "grok";
 };
 
 export type Directive = {
@@ -214,6 +214,12 @@ export type SimulatorCommand =
   | {
       type: "create_zone";
       name: string;
+      polygon: LatLng[];
+    }
+  | {
+      type: "update_zone";
+      zoneId: string;
+      name?: string;
       polygon: LatLng[];
     }
   | {

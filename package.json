@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "verify:sim": "node --no-warnings --experimental-strip-types --experimental-specifier-resolution=node scripts/verify-simulator.mts"
+    "verify:sim": "node --no-warnings --experimental-strip-types --experimental-specifier-resolution=node scripts/verify-simulator.mts",
+    "verify:realtime": "node --no-warnings --experimental-strip-types scripts/verify-realtime.mts"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
