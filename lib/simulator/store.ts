@@ -16,6 +16,7 @@ import {
   HISTORY_INTERVAL_MS,
   HISTORY_WINDOW_MS,
   isStoppedStatus,
+  resolveWeatherMultiplier,
   resolveMovingStatus,
   SIM_TICK_MS,
   updateRemainingRoute,
@@ -103,6 +104,7 @@ export class SimulatorStore {
   private keyEvents: string[] = [];
   private listeners = new Set<Listener>();
   private tickCount = 0;
+  private stateVersion = 0;
   private timer?: NodeJS.Timeout;
   private lastTickAt = Date.now();
   private lastHistoryAt = 0;
@@ -175,6 +177,7 @@ export class SimulatorStore {
       scenarioName: this.seed.scenario.name,
       serverTime: Date.now(),
       tick: this.tickCount,
+      stateVersion: this.stateVersion,
       boundingBox: this.seed.boundingBox,
       navigableWater: this.seed.navigableWater,
       ports: this.seed.ports,
@@ -209,6 +212,7 @@ export class SimulatorStore {
       this.acknowledgeAlert(command.alertId);
     }
 
+    this.stateVersion += 1;
     this.broadcast();
     return this.snapshot();
   }
@@ -218,6 +222,7 @@ export class SimulatorStore {
     const deltaSeconds = Math.max(0.25, (now - this.lastTickAt) / 1000);
     this.lastTickAt = now;
     this.tickCount += 1;
+    this.stateVersion += 1;
 
     this.applyQueuedAcceptedDirectives();
     this.ships = this.ships.map((ship) => this.advanceShip(ship, deltaSeconds, now));
@@ -274,6 +279,7 @@ export class SimulatorStore {
     }
 
     const canMove = !isStoppedStatus(ship.status);
+    const weatherMultiplier = resolveWeatherMultiplier(ship.position, this.weatherSamples);
     const routeWaypoints =
       ship.currentRoute.valid && ship.currentRoute.waypoints.length >= 2
         ? ship.currentRoute.waypoints
@@ -287,7 +293,7 @@ export class SimulatorStore {
           speedKnots: ship.speedKnots,
           deltaSeconds,
           fuelTons: ship.fuelTons,
-          weatherMultiplier: ship.weatherMultiplier,
+          weatherMultiplier,
         })
       : 0;
     const distanceKm = Math.min(movementBudgetKm, distanceToWaypointKm || distanceToDestinationKm);
@@ -298,7 +304,7 @@ export class SimulatorStore {
     const inNavigableWater = pointInPolygon(movedPosition, this.seed.navigableWater);
     const nextPosition = inNavigableWater ? movedPosition : ship.position;
     const actualDistanceKm = inNavigableWater ? distanceKm : 0;
-    const fuelBurn = calculateFuelBurnTons(actualDistanceKm, ship.weatherMultiplier);
+    const fuelBurn = calculateFuelBurnTons(actualDistanceKm, weatherMultiplier);
     const remainingFuel = Math.max(0, ship.fuelTons - fuelBurn);
     const nextWaypointIndex =
       distanceToWaypointKm <= Math.max(distanceKm, 0.5)
@@ -309,7 +315,7 @@ export class SimulatorStore {
       currentPosition: nextPosition,
       activeWaypointIndex: nextWaypointIndex,
       fallbackDestination: destination.position,
-      weatherMultiplier: ship.weatherMultiplier,
+      weatherMultiplier,
     });
     const nextHasInsufficientFuel = hasInsufficientFuel({
       fuelTons: remainingFuel,
@@ -374,6 +380,7 @@ export class SimulatorStore {
       currentRoute: remainingRoute,
       activeWaypointIndex: 1,
       lastUpdateAt: now,
+      weatherMultiplier,
     };
   }
 

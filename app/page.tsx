@@ -1,8 +1,15 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { interpolateLatLng } from "@/lib/geo";
-import type { AlertSeverity, DirectiveType, LatLng, ShipState, SimulatorSnapshot } from "@/lib/domain";
+import type {
+  AlertSeverity,
+  DirectiveType,
+  LatLng,
+  ShipState,
+  SimulatorSnapshot,
+  SimulatorStreamEvent,
+} from "@/lib/domain";
 
 const MAP_WIDTH = 1000;
 const MAP_HEIGHT = 620;
@@ -76,12 +83,23 @@ export default function Page() {
   );
   const [now, setNow] = useState(0);
   const [connectionState, setConnectionState] = useState("connecting");
+  const [streamLagMs, setStreamLagMs] = useState(0);
+  const latestVersionRef = useRef(-1);
 
   useEffect(() => {
     const source = new EventSource("/api/sim/stream");
 
     source.addEventListener("snapshot", (event) => {
-      setSnapshot(JSON.parse((event as MessageEvent).data) as SimulatorSnapshot);
+      const streamEvent = JSON.parse((event as MessageEvent).data) as SimulatorStreamEvent;
+      const nextSnapshot = streamEvent.snapshot;
+
+      if (nextSnapshot.stateVersion <= latestVersionRef.current) {
+        return;
+      }
+
+      latestVersionRef.current = nextSnapshot.stateVersion;
+      setSnapshot(nextSnapshot);
+      setStreamLagMs(Math.max(0, Date.now() - streamEvent.sentAt));
       setConnectionState("live");
     });
     source.onerror = () => setConnectionState("reconnecting");
@@ -188,7 +206,8 @@ export default function Page() {
           <div>
             <h1 className="text-xl font-semibold tracking-wide">Fleet Crisis Command</h1>
             <p className="text-xs text-slate-400">
-              {snapshot.scenarioName} - {snapshot.metrics.activeShips} ships - tick {snapshot.tick}
+              {snapshot.scenarioName} - {snapshot.metrics.activeShips} ships - tick {snapshot.tick} - v
+              {snapshot.stateVersion}
             </p>
           </div>
           <div className="flex items-center gap-2 text-xs">
@@ -198,6 +217,7 @@ export default function Page() {
             <span className="border border-white/10 px-3 py-1 text-slate-300">
               viewers {snapshot.metrics.connectedViewers}
             </span>
+            <span className="border border-white/10 px-3 py-1 text-slate-300">lag {streamLagMs}ms</span>
             <div className="flex border border-white/10">
               <button
                 className={`px-3 py-1 ${role === "command" ? "bg-cyan-300 text-slate-950" : "text-slate-300"}`}

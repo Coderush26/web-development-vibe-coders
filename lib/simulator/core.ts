@@ -1,11 +1,12 @@
 import { haversineDistanceKm, knotsToKmPerSecond } from "../geo.ts";
-import type { LatLng, RoutePlan, ShipStatus } from "../domain.ts";
+import type { LatLng, RoutePlan, ShipStatus, WeatherSample } from "../domain.ts";
 
 export const SIM_TICK_MS = 1000;
 export const BASE_FUEL_TONS_PER_KM = 0.08;
 export const INSUFFICIENT_FUEL_BUFFER = 1.1;
 export const HISTORY_INTERVAL_MS = 30_000;
 export const HISTORY_WINDOW_MS = 60 * 60 * 1000;
+export const ADVERSE_WEATHER_RADIUS_KM = 75;
 
 const stoppedStatuses = new Set<ShipStatus>(["arrived", "out_of_fuel", "stranded", "stopped"]);
 
@@ -29,6 +30,22 @@ export function estimateFuelForDistance(distanceKm: number, multiplier = 1): num
 
 export function calculateFuelBurnTons(distanceKm: number, weatherMultiplier: number): number {
   return estimateFuelForDistance(distanceKm, weatherMultiplier);
+}
+
+export function resolveWeatherMultiplier(
+  position: LatLng,
+  weatherSamples: WeatherSample[],
+): number {
+  if (weatherSamples.length === 0) {
+    return 1;
+  }
+
+  const nearbyAdverseSample = weatherSamples.find(
+    (sample) =>
+      sample.adverse && haversineDistanceKm(position, sample.position) <= ADVERSE_WEATHER_RADIUS_KM,
+  );
+
+  return nearbyAdverseSample?.fuelMultiplier ?? 1;
 }
 
 export function calculateFuelLimitedDistanceKm(fuelTons: number, weatherMultiplier: number): number {

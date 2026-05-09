@@ -174,6 +174,7 @@ export type SimulatorSnapshot = {
   scenarioName: string;
   serverTime: number;
   tick: number;
+  stateVersion: number;
   boundingBox: BoundingBox;
   navigableWater: LatLng[];
   ports: Port[];
@@ -188,6 +189,13 @@ export type SimulatorSnapshot = {
     tickHz: number;
     activeShips: number;
   };
+};
+
+export type SimulatorStreamEvent = {
+  eventId: string;
+  sentAt: number;
+  transport: "sse";
+  snapshot: SimulatorSnapshot;
 };
 
 export type SimulatorCommand =
