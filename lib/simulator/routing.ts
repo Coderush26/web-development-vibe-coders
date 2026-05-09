@@ -310,9 +310,10 @@ export function computeRoutePlan(args: {
     [25.90, 56.75], // Gulf of Oman south
 
     // ── South channel through the Strait (below Musandam peninsula) ──────
-    [24.90, 56.95], // Sohar offshore departure lane
-    [25.25, 56.95], // Gulf of Oman coastal-safe lane
-    [25.55, 56.82], // approach to southern Hormuz channel
+    [24.85, 57.25], // Sohar offshore departure lane
+    [25.35, 57.30], // Gulf of Oman coastal-safe lane
+    [25.85, 57.15], // offshore approach around the Oman coast
+    [26.10, 56.92], // approach to southern Hormuz channel
     [25.60, 55.95], // south channel approach from west
     [25.55, 56.25], // south channel mid (below Musandam zone)
     [25.60, 56.55], // south channel east (clear of Musandam)
@@ -466,7 +467,7 @@ function computeRoutePlanWithCostWeight(
   const interiorNodes: LatLng[] = [
     [26.50, 56.00], [26.45, 56.25], [26.42, 56.50], [26.38, 56.75],
     [26.30, 56.55], [26.20, 56.62], [26.10, 56.70], [25.90, 56.75],
-    [24.90, 56.95], [25.25, 56.95], [25.55, 56.82],
+    [24.85, 57.25], [25.35, 57.30], [25.85, 57.15], [26.10, 56.92],
     [25.60, 55.95], [25.55, 56.25], [25.60, 56.55],
     [26.60, 56.00], [26.75, 56.50], [26.75, 57.00],
     [26.10, 54.80], [26.10, 55.30], [25.60, 54.80], [25.60, 55.30],

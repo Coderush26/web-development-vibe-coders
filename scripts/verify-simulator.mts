@@ -123,12 +123,16 @@ assert(
   "Routes from Sohar must not cut across the Fujairah/Oman coastal land strip.",
 );
 assert(
-  segmentStaysInNavigableWater([25.55, 56.82], [25.6, 56.55], fleetSeed.navigableWater),
-  "Routes from Sohar should still be able to approach the Strait by open water.",
+  !segmentStaysInNavigableWater([24.56, 56.9], [25.9, 56.75], fleetSeed.navigableWater),
+  "Routes from Sohar must not use the northbound coastal shortcut.",
 );
 assert(
-  segmentStaysInNavigableWater([24.56, 56.9], [24.9, 56.95], fleetSeed.navigableWater),
+  segmentStaysInNavigableWater([24.56, 56.9], [24.85, 57.25], fleetSeed.navigableWater),
   "Routes from Sohar should still be able to depart into the offshore lane.",
+);
+assert(
+  segmentStaysInNavigableWater([24.85, 57.25], [25.35, 57.3], fleetSeed.navigableWater),
+  "Offshore Sohar routing should remain available after blocking the coast.",
 );
 
 const ships: ShipState[] = fleetSeed.fleet.map((ship) => {
