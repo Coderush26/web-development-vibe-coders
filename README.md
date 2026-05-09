@@ -1,36 +1,51 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Fleet Crisis Command
+
+Local realtime simulator for the Code Rush Web Dev Track fleet-crisis scenario. The app loads the fixed 15-ship Strait of Hormuz scenario from `public/fleet.json`, advances an authoritative in-memory backend state at 1 Hz, and streams snapshots to connected viewers over a persistent Server-Sent Events connection.
 
 ## Getting Started
 
-First, run the development server:
+Use pnpm for local development:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the command system.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+If `pnpm` is not on PATH, use Corepack:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+corepack pnpm dev
+```
 
-## Learn More
+## Current Runtime
 
-To learn more about Next.js, take a look at the following resources:
+- `app/api/sim/stream` keeps a persistent SSE connection open and broadcasts authoritative simulator snapshots. This is intentionally non-polling live sync; a later phase can swap this transport to WebSocket without changing the simulator domain model.
+- `app/api/sim/directives` lets Command issue directives.
+- `app/api/sim/responses` lets Captains accept or escalate directives.
+- `app/api/sim/zones` lets Command create restricted zones.
+- `app/api/sim/alerts/ack` acknowledges active alerts.
+- Runtime state is in memory for local judging simplicity: ships, directives, alerts, zones, weather samples, and playback history.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Environment Variables and API Keys
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+No required API keys are needed for the first implementation phase.
 
-## Deploy on Vercel
+Planned weather integration will use Open-Meteo by default because basic forecast data can be fetched without a required API key. If a later provider is added, document its key here.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Assumptions
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `public/fleet.json` is immutable seed data and must contain exactly 15 ships.
+- Fuel burn currently uses a documented local estimate of `0.08 tons/km`, with a multiplier field already present for the upcoming adverse-weather phase.
+- Phase 1 uses a direct destination route estimate while the routing phase will replace it with grid/A* restricted-zone and weather avoidance.
+- Restricted-zone creation is implemented as a command action and immediately alerts ships already inside the new polygon.
+- Playback history is retained in memory for the last hour at 30-second resolution.
+
+## Verification
+
+```bash
+pnpm lint
+pnpm build
+```
+
+Manual browser checks should cover live fleet updates, Command directive issue, Captain accept/escalate, restricted-zone alerting, alert acknowledgement, role scoping, and playback history visibility as those features are completed.

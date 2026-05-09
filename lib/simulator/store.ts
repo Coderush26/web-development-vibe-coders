@@ -1,0 +1,598 @@
+import "server-only";
+
+import {
+  bearingDegrees,
+  clampToBoundingBox,
+  haversineDistanceKm,
+  knotsToKmPerSecond,
+  movePosition,
+  pointInPolygon,
+} from "@/lib/geo";
+import { getFleetSeed } from "@/lib/fleet-seed";
+import type {
+  Alert,
+  AlertSeverity,
+  CaptainResponse,
+  Directive,
+  DirectiveType,
+  DistressAnalysis,
+  HistorySnapshot,
+  LatLng,
+  RestrictedZone,
+  RoutePlan,
+  ShipState,
+  SimulatorCommand,
+  SimulatorSnapshot,
+  WeatherSample,
+} from "@/lib/domain";
+
+type Listener = (snapshot: SimulatorSnapshot) => void;
+
+const TICK_MS = 1000;
+const BASE_FUEL_TONS_PER_KM = 0.08;
+const INSUFFICIENT_FUEL_BUFFER = 1.1;
+const HISTORY_INTERVAL_MS = 30_000;
+const HISTORY_WINDOW_MS = 60 * 60 * 1000;
+
+function makeId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function estimateDirectRoute(shipId: string, from: LatLng, to: LatLng): RoutePlan {
+  const distanceKm = haversineDistanceKm(from, to);
+
+  return {
+    shipId,
+    waypoints: [from, to],
+    distanceKm,
+    estimatedFuelTons: distanceKm * BASE_FUEL_TONS_PER_KM,
+    weatherExposure: "clear",
+    valid: true,
+  };
+}
+
+function analyzeDistressMessage(message: string): DistressAnalysis {
+  const normalized = message.toLowerCase();
+  const impacts: Record<string, number | string> = {};
+  const numberMatch = normalized.match(/\b(\d{1,4})\b/);
+
+  if (numberMatch) {
+    impacts.reportedCount = Number(numberMatch[1]);
+  }
+
+  const category =
+    normalized.includes("fire") || normalized.includes("burn")
+      ? "fire"
+      : normalized.includes("engine") || normalized.includes("propulsion")
+        ? "engine_failure"
+        : normalized.includes("flood") || normalized.includes("water")
+          ? "flooding"
+          : normalized.includes("injur") || normalized.includes("medical")
+            ? "medical"
+            : normalized.includes("cargo") || normalized.includes("spill")
+              ? "cargo_damage"
+              : "unknown";
+
+  const severity: AlertSeverity =
+    normalized.includes("mayday") ||
+    normalized.includes("critical") ||
+    normalized.includes("fire") ||
+    normalized.includes("sinking") ||
+    normalized.includes("explosion")
+      ? "critical"
+      : normalized.includes("urgent") ||
+          normalized.includes("injur") ||
+          normalized.includes("engine") ||
+          normalized.includes("flood")
+        ? "warning"
+        : "info";
+
+  if (category !== "unknown") {
+    impacts.problem = category;
+  }
+
+  return {
+    severity,
+    problemCategory: category,
+    impacts,
+    confidence: category === "unknown" ? 0.45 : 0.78,
+    source: "local_rules",
+  };
+}
+
+export class SimulatorStore {
+  private readonly seed = getFleetSeed();
+  private ships: ShipState[];
+  private restrictedZones: RestrictedZone[] = [];
+  private alerts: Alert[] = [];
+  private directives: Directive[] = [];
+  private weatherSamples: WeatherSample[] = [];
+  private history: HistorySnapshot[] = [];
+  private keyEvents: string[] = [];
+  private listeners = new Set<Listener>();
+  private tickCount = 0;
+  private timer?: NodeJS.Timeout;
+  private lastTickAt = Date.now();
+  private lastHistoryAt = 0;
+
+  constructor() {
+    this.ships = this.seed.fleet.map((ship) => {
+      const destination = this.seed.ports.find((port) => port.id === ship.destination);
+
+      if (!destination) {
+        throw new Error(`Ship ${ship.shipId} points at unknown destination ${ship.destination}.`);
+      }
+
+      return {
+        id: ship.shipId,
+        name: ship.name,
+        position: ship.position,
+        previousPosition: ship.position,
+        speedKnots: ship.speed,
+        headingDegrees: ship.heading,
+        destinationPortId: ship.destination,
+        fuelTons: ship.fuel,
+        cargo: ship.cargo,
+        status: ship.status,
+        currentRoute: estimateDirectRoute(ship.shipId, ship.position, destination.position),
+        lastUpdateAt: Date.now(),
+        weatherMultiplier: 1,
+      };
+    });
+
+    this.weatherSamples = [
+      {
+        id: "initial-clear",
+        position: [26.3, 56.2],
+        timestamp: Date.now(),
+        adverse: false,
+        summary: "Weather provider not connected yet; local clear sample active.",
+        fuelMultiplier: 1,
+      },
+    ];
+
+    this.start();
+  }
+
+  start(): void {
+    if (this.timer) {
+      return;
+    }
+
+    this.lastTickAt = Date.now();
+    this.timer = setInterval(() => this.tick(), TICK_MS);
+  }
+
+  subscribe(listener: Listener): () => void {
+    this.listeners.add(listener);
+    listener(this.snapshot());
+
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  get connectedViewers(): number {
+    return this.listeners.size;
+  }
+
+  snapshot(): SimulatorSnapshot {
+    return {
+      scenarioName: this.seed.scenario.name,
+      serverTime: Date.now(),
+      tick: this.tickCount,
+      boundingBox: this.seed.boundingBox,
+      navigableWater: this.seed.navigableWater,
+      ports: this.seed.ports,
+      ships: this.ships,
+      restrictedZones: this.restrictedZones,
+      alerts: this.alerts,
+      directives: this.directives,
+      weatherSamples: this.weatherSamples,
+      history: this.history,
+      metrics: {
+        connectedViewers: this.connectedViewers,
+        tickHz: 1000 / TICK_MS,
+        activeShips: this.ships.length,
+      },
+    };
+  }
+
+  dispatch(command: SimulatorCommand): SimulatorSnapshot {
+    if (command.type === "issue_directive") {
+      this.issueDirective(command.targetShipId, command.directiveType, command.payload);
+    }
+
+    if (command.type === "captain_response") {
+      this.recordCaptainResponse(command.directiveId, command.responseType, command.distressMessage);
+    }
+
+    if (command.type === "create_zone") {
+      this.createRestrictedZone(command.name, command.polygon);
+    }
+
+    if (command.type === "ack_alert") {
+      this.acknowledgeAlert(command.alertId);
+    }
+
+    this.broadcast();
+    return this.snapshot();
+  }
+
+  private tick(): void {
+    const now = Date.now();
+    const deltaSeconds = Math.max(0.25, (now - this.lastTickAt) / 1000);
+    this.lastTickAt = now;
+    this.tickCount += 1;
+
+    this.ships = this.ships.map((ship) => this.advanceShip(ship, deltaSeconds, now));
+    this.checkProximity();
+    this.captureHistory(now);
+    this.broadcast();
+  }
+
+  private advanceShip(ship: ShipState, deltaSeconds: number, now: number): ShipState {
+    const destination = this.seed.ports.find((port) => port.id === ship.destinationPortId);
+
+    if (!destination) {
+      return ship;
+    }
+
+    const distanceToDestinationKm = haversineDistanceKm(ship.position, destination.position);
+
+    if (distanceToDestinationKm < 1) {
+      this.upsertAlert(
+        "arrival",
+        "info",
+        [ship.id],
+        `${ship.name} arrived at ${destination.name}.`,
+        `arrival:${ship.id}:${destination.id}`,
+      );
+
+      return {
+        ...ship,
+        previousPosition: ship.position,
+        speedKnots: 0,
+        status: "arrived",
+        lastUpdateAt: now,
+      };
+    }
+
+    if (ship.fuelTons <= 0) {
+      this.upsertAlert(
+        "out_of_fuel",
+        "critical",
+        [ship.id],
+        `${ship.name} is out of fuel and stopped.`,
+        `out_of_fuel:${ship.id}`,
+      );
+
+      return {
+        ...ship,
+        previousPosition: ship.position,
+        speedKnots: 0,
+        fuelTons: 0,
+        status: "out_of_fuel",
+        lastUpdateAt: now,
+      };
+    }
+
+    const insideRestrictedZone = this.restrictedZones.some(
+      (zone) => zone.active && pointInPolygon(ship.position, zone.polygon),
+    );
+
+    if (insideRestrictedZone) {
+      this.upsertAlert(
+        "restricted_zone_breach",
+        "critical",
+        [ship.id],
+        `${ship.name} is inside an active restricted zone.`,
+        `breach:${ship.id}`,
+      );
+    }
+
+    const headingDegrees = ship.status === "stopped" ? ship.headingDegrees : bearingDegrees(ship.position, destination.position);
+    const distanceKm = ship.status === "stopped" ? 0 : knotsToKmPerSecond(ship.speedKnots) * deltaSeconds;
+    const movedPosition = clampToBoundingBox(
+      movePosition(ship.position, headingDegrees, Math.min(distanceKm, distanceToDestinationKm)),
+      this.seed.boundingBox,
+    );
+    const inNavigableWater = pointInPolygon(movedPosition, this.seed.navigableWater);
+    const nextPosition = inNavigableWater ? movedPosition : ship.position;
+    const fuelBurn = distanceKm * BASE_FUEL_TONS_PER_KM * ship.weatherMultiplier;
+    const remainingFuel = Math.max(0, ship.fuelTons - fuelBurn);
+    const remainingRouteFuel = distanceToDestinationKm * BASE_FUEL_TONS_PER_KM * INSUFFICIENT_FUEL_BUFFER;
+    let status = ship.status === "rerouting" ? "normal" : ship.status;
+
+    if (!inNavigableWater) {
+      status = "stranded";
+      this.upsertAlert(
+        "stranded",
+        "critical",
+        [ship.id],
+        `${ship.name} cannot advance without leaving navigable water.`,
+        `stranded:${ship.id}`,
+      );
+    } else if (remainingFuel < remainingRouteFuel && status !== "distressed") {
+      status = "insufficient_fuel";
+      this.upsertAlert(
+        "insufficient_fuel",
+        "warning",
+        [ship.id],
+        `${ship.name} may not have enough fuel to reach ${destination.name}.`,
+        `fuel:${ship.id}`,
+      );
+    } else if (status !== "distressed" && status !== "stopped") {
+      status = "normal";
+    }
+
+    return {
+      ...ship,
+      position: nextPosition,
+      previousPosition: ship.position,
+      headingDegrees,
+      fuelTons: remainingFuel,
+      status,
+      currentRoute: estimateDirectRoute(ship.id, nextPosition, destination.position),
+      lastUpdateAt: now,
+    };
+  }
+
+  private issueDirective(
+    targetShipId: string,
+    directiveType: DirectiveType,
+    payload: Record<string, string | number | boolean>,
+  ): void {
+    const ship = this.ships.find((candidate) => candidate.id === targetShipId);
+
+    if (!ship) {
+      return;
+    }
+
+    this.directives.unshift({
+      id: makeId("directive"),
+      targetShipId,
+      type: directiveType,
+      payload,
+      issuedBy: "command",
+      issuedAt: Date.now(),
+      status: "pending",
+    });
+    this.keyEvents.push(`Directive ${directiveType} issued to ${ship.name}.`);
+  }
+
+  private recordCaptainResponse(
+    directiveId: string,
+    responseType: "ACCEPT" | "ESCALATE_DISTRESS",
+    distressMessage?: string,
+  ): void {
+    const directive = this.directives.find((candidate) => candidate.id === directiveId);
+
+    if (!directive) {
+      return;
+    }
+
+    const ship = this.ships.find((candidate) => candidate.id === directive.targetShipId);
+
+    if (!ship) {
+      return;
+    }
+
+    const distressAnalysis =
+      responseType === "ESCALATE_DISTRESS" && distressMessage
+        ? analyzeDistressMessage(distressMessage)
+        : undefined;
+    const response: CaptainResponse = {
+      directiveId,
+      shipId: ship.id,
+      responseType,
+      distressMessage,
+      distressAnalysis,
+      respondedAt: Date.now(),
+    };
+
+    directive.captainResponse = response;
+    directive.status = responseType === "ACCEPT" ? "accepted" : "distress_escalated";
+
+    if (responseType === "ACCEPT") {
+      this.applyAcceptedDirective(directive);
+      this.keyEvents.push(`${ship.name} accepted directive ${directive.type}.`);
+    } else {
+      this.ships = this.ships.map((candidate) =>
+        candidate.id === ship.id ? { ...candidate, status: "distressed" } : candidate,
+      );
+      this.upsertAlert(
+        "distress_escalation",
+        distressAnalysis?.severity ?? "warning",
+        [ship.id],
+        `${ship.name} escalated distress: ${distressMessage ?? "No details supplied."}`,
+        `distress:${directive.id}`,
+      );
+      this.keyEvents.push(`${ship.name} escalated distress.`);
+    }
+  }
+
+  private applyAcceptedDirective(directive: Directive): void {
+    this.ships = this.ships.map((ship) => {
+      if (ship.id !== directive.targetShipId) {
+        return ship;
+      }
+
+      if (directive.type === "HOLD_POSITION") {
+        return { ...ship, status: "stopped", speedKnots: 0 };
+      }
+
+      if (directive.type === "RESUME_COURSE") {
+        return { ...ship, status: "normal", speedKnots: Math.max(ship.speedKnots, 10) };
+      }
+
+      if (directive.type === "CHANGE_SPEED") {
+        const speedKnots = Number(directive.payload.speedKnots);
+        return Number.isFinite(speedKnots)
+          ? { ...ship, status: "normal", speedKnots: Math.max(0, Math.min(28, speedKnots)) }
+          : ship;
+      }
+
+      if (directive.type === "REROUTE_PORT") {
+        const destinationPortId = String(directive.payload.destinationPortId ?? ship.destinationPortId);
+        const destination = this.seed.ports.find((port) => port.id === destinationPortId);
+
+        if (!destination) {
+          return ship;
+        }
+
+        return {
+          ...ship,
+          destinationPortId,
+          status: "rerouting",
+          currentRoute: estimateDirectRoute(ship.id, ship.position, destination.position),
+        };
+      }
+
+      return ship;
+    });
+  }
+
+  private createRestrictedZone(name: string, polygon: LatLng[]): void {
+    if (polygon.length < 3) {
+      return;
+    }
+
+    const zone: RestrictedZone = {
+      id: makeId("zone"),
+      name: name.trim() || `Restricted Zone ${this.restrictedZones.length + 1}`,
+      polygon,
+      createdBy: "command",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      active: true,
+      editable: true,
+    };
+
+    this.restrictedZones.unshift(zone);
+    this.keyEvents.push(`${zone.name} created.`);
+
+    this.ships = this.ships.map((ship) => {
+      if (pointInPolygon(ship.position, polygon)) {
+        this.upsertAlert(
+          "restricted_zone_breach",
+          "critical",
+          [ship.id],
+          `${ship.name} is already inside new zone ${zone.name}.`,
+          `breach:${ship.id}:${zone.id}`,
+        );
+
+        return { ...ship, status: "rerouting" };
+      }
+
+      return ship;
+    });
+  }
+
+  private acknowledgeAlert(alertId: string): void {
+    const now = Date.now();
+    this.alerts = this.alerts.map((alert) =>
+      alert.id === alertId ? { ...alert, acknowledgedAt: now } : alert,
+    );
+  }
+
+  private checkProximity(): void {
+    for (let i = 0; i < this.ships.length; i += 1) {
+      for (let j = i + 1; j < this.ships.length; j += 1) {
+        const a = this.ships[i];
+        const b = this.ships[j];
+        const distanceKm = haversineDistanceKm(a.position, b.position);
+
+        if (distanceKm <= 2) {
+          this.upsertAlert(
+            "proximity_warning",
+            "warning",
+            [a.id, b.id],
+            `${a.name} and ${b.name} are within ${distanceKm.toFixed(1)} km.`,
+            `proximity:${a.id}:${b.id}`,
+          );
+        } else if (distanceKm >= 2.5) {
+          this.resolveAlert(`proximity:${a.id}:${b.id}`);
+        }
+      }
+    }
+  }
+
+  private upsertAlert(
+    type: Alert["type"],
+    severity: AlertSeverity,
+    affectedShipIds: string[],
+    message: string,
+    sourceEventId: string,
+  ): void {
+    const existing = this.alerts.find(
+      (alert) => alert.sourceEventId === sourceEventId && !alert.resolvedAt,
+    );
+
+    if (existing) {
+      return;
+    }
+
+    this.alerts.unshift({
+      id: makeId("alert"),
+      type,
+      severity,
+      affectedShipIds,
+      message,
+      createdAt: Date.now(),
+      sourceEventId,
+    });
+    this.keyEvents.push(message);
+  }
+
+  private resolveAlert(sourceEventId: string): void {
+    const now = Date.now();
+    this.alerts = this.alerts.map((alert) =>
+      alert.sourceEventId === sourceEventId && !alert.resolvedAt
+        ? { ...alert, resolvedAt: now }
+        : alert,
+    );
+  }
+
+  private captureHistory(now: number): void {
+    if (now - this.lastHistoryAt < HISTORY_INTERVAL_MS) {
+      return;
+    }
+
+    this.lastHistoryAt = now;
+    this.history.unshift({
+      timestamp: now,
+      shipPositions: this.ships.map((ship) => ({
+        shipId: ship.id,
+        position: ship.position,
+        status: ship.status,
+        fuelTons: ship.fuelTons,
+      })),
+      keyEvents: this.keyEvents.splice(0, this.keyEvents.length),
+      activeAlertCount: this.alerts.filter((alert) => !alert.resolvedAt && !alert.acknowledgedAt).length,
+      restrictedZoneCount: this.restrictedZones.filter((zone) => zone.active).length,
+    });
+    this.history = this.history.filter((snapshot) => now - snapshot.timestamp <= HISTORY_WINDOW_MS);
+  }
+
+  private broadcast(): void {
+    if (this.listeners.size === 0) {
+      return;
+    }
+
+    const snapshot = this.snapshot();
+    this.listeners.forEach((listener) => listener(snapshot));
+  }
+}
+
+const globalForSimulator = globalThis as typeof globalThis & {
+  __fleetSimulatorStore?: SimulatorStore;
+};
+
+export function getSimulatorStore(): SimulatorStore {
+  if (!globalForSimulator.__fleetSimulatorStore) {
+    globalForSimulator.__fleetSimulatorStore = new SimulatorStore();
+  }
+
+  return globalForSimulator.__fleetSimulatorStore;
+}
