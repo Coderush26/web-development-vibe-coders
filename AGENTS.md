@@ -10,6 +10,10 @@ Use `public/fleet.json` as the canonical fixed scenario data. It defines the Str
 
 Build an end-to-end real-time crisis command system for 15 commercial cargo ships moving through the Persian Gulf, Strait of Hormuz, and Gulf of Oman during a high-risk blockade scenario. The app should prioritize core simulator behavior before bonus features.
 
+## Project Plan
+
+Before large feature work, read `Plan.md`, `public/WEB DEVELOPMENT PROBLEM STATEMENT.pdf`, and `public/fleet.json`. `Plan.md` is the implementation sequencing source of truth, while the PDF remains the grading source of truth.
+
 Core requirements from the project brief:
 
 - Simulate exactly 15 active ships, advancing backend state at 1 Hz or faster.
