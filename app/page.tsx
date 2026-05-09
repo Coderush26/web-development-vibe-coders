@@ -264,6 +264,13 @@ export default function Page() {
       ? snapshot.history[playbackCursor]
       : undefined;
   const inPlayback = Boolean(playbackFrame);
+  const oldestHistoryFrame = snapshot?.history.at(-1);
+  const newestHistoryFrame = snapshot?.history[0];
+  const playbackEventCount =
+    snapshot?.history.reduce(
+      (count, frame) => count + frame.keyEvents.length,
+      0,
+    ) ?? 0;
 
   useEffect(() => {
     if (!snapshot || inPlayback) {
@@ -1129,10 +1136,22 @@ export default function Page() {
             <>
               {/* Playback controls */}
               <div className="border-b border-white/6 p-4">
-                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
-                  Playback
-                </p>
-                <div className="flex items-center gap-2">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <p className="text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
+                    Playback
+                  </p>
+                  <span
+                    className={`rounded border px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest ${
+                      inPlayback
+                        ? "border-amber-400/40 bg-amber-400/10 text-amber-300"
+                        : "border-emerald-400/30 bg-emerald-400/10 text-emerald-300"
+                    }`}
+                  >
+                    {inPlayback ? "Review" : "Live"}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
                   <Button
                     onClick={() => setPlaybackIndex(null)}
                     size="sm"
@@ -1155,25 +1174,135 @@ export default function Page() {
                     Review
                   </Button>
                 </div>
-                <input
-                  className="mt-3 w-full accent-cyan-400"
-                  disabled={snapshot.history.length === 0}
-                  max={Math.max(0, snapshot.history.length - 1)}
-                  min={0}
-                  onChange={(event) =>
-                    setPlaybackIndex(Number(event.target.value))
-                  }
-                  type="range"
-                  value={playbackCursor}
-                />
-                <p className="mt-2 text-[10px] text-slate-500">
-                  {inPlayback && playbackFrame
-                    ? `Viewing ${formatTime(playbackFrame.timestamp)} (${playbackCursor}/${Math.max(
-                        0,
-                        snapshot.history.length - 1,
-                      )})`
-                    : `Live mode (${snapshot.history.length} history points available)`}
-                </p>
+
+                <div className="mt-3 rounded border border-white/8 bg-black/20 p-3">
+                  <input
+                    className="w-full accent-cyan-400"
+                    disabled={snapshot.history.length === 0}
+                    max={Math.max(0, snapshot.history.length - 1)}
+                    min={0}
+                    onChange={(event) =>
+                      setPlaybackIndex(Number(event.target.value))
+                    }
+                    type="range"
+                    value={playbackCursor}
+                  />
+                  <div className="mt-1 flex justify-between text-[9px] uppercase tracking-wider text-slate-600">
+                    <span>
+                      {newestHistoryFrame
+                        ? `Newest ${formatTime(newestHistoryFrame.timestamp)}`
+                        : "No frames"}
+                    </span>
+                    <span>
+                      {oldestHistoryFrame
+                        ? `Oldest ${formatTime(oldestHistoryFrame.timestamp)}`
+                        : ""}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <Button
+                    disabled={!inPlayback || playbackCursor <= 0}
+                    onClick={() =>
+                      setPlaybackIndex(Math.max(0, playbackCursor - 1))
+                    }
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Newer
+                  </Button>
+                  <Button
+                    disabled={
+                      !inPlayback ||
+                      playbackCursor >= Math.max(0, snapshot.history.length - 1)
+                    }
+                    onClick={() =>
+                      setPlaybackIndex(
+                        Math.min(
+                          Math.max(0, snapshot.history.length - 1),
+                          playbackCursor + 1,
+                        ),
+                      )
+                    }
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Older
+                  </Button>
+                </div>
+
+                {playbackFrame ? (
+                  <div className="mt-3 space-y-3 rounded border border-amber-400/20 bg-amber-950/10 p-3">
+                    <div className="grid grid-cols-2 gap-2 text-[10px]">
+                      <div>
+                        <p className="uppercase tracking-wider text-slate-600">
+                          Frame
+                        </p>
+                        <p className="font-mono text-slate-300">
+                          {playbackCursor + 1}/{snapshot.history.length} · tick{" "}
+                          {playbackFrame.tick}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="uppercase tracking-wider text-slate-600">
+                          Alerts / Zones
+                        </p>
+                        <p className="font-mono text-slate-300">
+                          {playbackFrame.activeAlertCount} /{" "}
+                          {playbackFrame.restrictedZoneCount}
+                        </p>
+                      </div>
+                    </div>
+                    <div>
+                      <p className="mb-1 text-[9px] uppercase tracking-wider text-slate-600">
+                        Status Mix
+                      </p>
+                      <div className="flex flex-wrap gap-1">
+                        {Object.entries(playbackFrame.statusCounts ?? {}).map(
+                          ([status, count]) => (
+                            <span
+                              className="rounded border border-white/8 bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-300"
+                              key={status}
+                            >
+                              {formatStatus(status as ShipState["status"])}{" "}
+                              {count}
+                            </span>
+                          ),
+                        )}
+                      </div>
+                    </div>
+                    <div>
+                      <p className="mb-1 text-[9px] uppercase tracking-wider text-slate-600">
+                        Key Events
+                      </p>
+                      {playbackFrame.keyEvents.length === 0 ? (
+                        <p className="text-[10px] text-slate-600">
+                          No operational events recorded in this 30-second
+                          frame.
+                        </p>
+                      ) : (
+                        <div className="thin-scroll max-h-24 space-y-1 overflow-y-auto pr-1">
+                          {playbackFrame.keyEvents.map((event, index) => (
+                            <p
+                              className="border-l border-cyan-400/30 pl-2 text-[10px] leading-snug text-slate-300"
+                              key={`${playbackFrame.timestamp}-${index}`}
+                            >
+                              {event}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-2 text-[10px] text-slate-500">
+                    Live mode ({snapshot.history.length} history points,{" "}
+                    {playbackEventCount} recorded events available)
+                  </p>
+                )}
               </div>
 
               {/* Selected Ship */}

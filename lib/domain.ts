@@ -159,6 +159,7 @@ export type CaptainResponse = {
 
 export type HistorySnapshot = {
   timestamp: number;
+  tick: number;
   shipPositions: Array<{
     shipId: string;
     position: LatLng;
@@ -168,6 +169,7 @@ export type HistorySnapshot = {
   keyEvents: string[];
   activeAlertCount: number;
   restrictedZoneCount: number;
+  statusCounts: Partial<Record<ShipStatus, number>>;
 };
 
 export type SimulatorSnapshot = {

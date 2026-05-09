@@ -795,8 +795,17 @@ export class SimulatorStore {
     }
 
     this.lastHistoryAt = now;
+    const statusCounts = this.ships.reduce<Partial<Record<ShipState["status"], number>>>(
+      (counts, ship) => ({
+        ...counts,
+        [ship.status]: (counts[ship.status] ?? 0) + 1,
+      }),
+      {},
+    );
+
     this.history.unshift({
       timestamp: now,
+      tick: this.tickCount,
       shipPositions: this.ships.map((ship) => ({
         shipId: ship.id,
         position: ship.position,
@@ -806,6 +815,7 @@ export class SimulatorStore {
       keyEvents: this.keyEvents.splice(0, this.keyEvents.length),
       activeAlertCount: this.alerts.filter((alert) => !alert.resolvedAt && !alert.acknowledgedAt).length,
       restrictedZoneCount: this.restrictedZones.filter((zone) => zone.active).length,
+      statusCounts,
     });
     this.history = this.history.filter((snapshot) => now - snapshot.timestamp <= HISTORY_WINDOW_MS);
   }
