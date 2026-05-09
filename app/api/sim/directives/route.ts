@@ -13,11 +13,17 @@ const directiveTypes: DirectiveType[] = [
 ];
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const body = (await request.json()) as {
+  let body: {
     targetShipId?: string;
     directiveType?: DirectiveType;
     payload?: Record<string, string | number | boolean>;
   };
+
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
 
   if (!body.targetShipId || !body.directiveType || !directiveTypes.includes(body.directiveType)) {
     return NextResponse.json({ error: "Invalid directive payload." }, { status: 400 });

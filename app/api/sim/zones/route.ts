@@ -15,10 +15,16 @@ function isLatLng(value: unknown): value is LatLng {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const body = (await request.json()) as {
+  let body: {
     name?: string;
     polygon?: unknown[];
   };
+
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
 
   if (!body.polygon || body.polygon.length < 3 || !body.polygon.every(isLatLng)) {
     return NextResponse.json({ error: "Restricted zones need at least three [lat,lng] points." }, { status: 400 });

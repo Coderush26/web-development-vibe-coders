@@ -107,6 +107,7 @@ export default function Page() {
 
   const selectedShip = visibleShips.find((ship) => ship.id === selectedShipId) ?? visibleShips[0];
   const captainShip = visibleShips.find((ship) => ship.id === captainShipId) ?? visibleShips[0];
+  const listedShips = role === "command" ? visibleShips : visibleShips.filter((ship) => ship.id === captainShipId);
   const pendingCaptainDirectives =
     snapshot?.directives.filter(
       (directive) => directive.targetShipId === captainShipId && directive.status === "pending",
@@ -164,6 +165,7 @@ export default function Page() {
   async function respondToDirective(directiveId: string, responseType: "ACCEPT" | "ESCALATE_DISTRESS") {
     await postJson("/api/sim/responses", {
       directiveId,
+      shipId: captainShipId,
       responseType,
       distressMessage: responseType === "ESCALATE_DISTRESS" ? distressMessage : undefined,
     });
@@ -206,7 +208,10 @@ export default function Page() {
               </button>
               <button
                 className={`px-3 py-1 ${role === "captain" ? "bg-cyan-300 text-slate-950" : "text-slate-300"}`}
-                onClick={() => setRole("captain")}
+                onClick={() => {
+                  setCaptainShipId(selectedShipId);
+                  setRole("captain");
+                }}
                 type="button"
               >
                 Captain
@@ -223,7 +228,7 @@ export default function Page() {
             <span className="text-xs text-slate-500">{formatTime(snapshot.serverTime)}</span>
           </div>
           <div className="max-h-[44vh] space-y-2 overflow-auto pr-1 xl:max-h-[70vh]">
-            {visibleShips.map((ship) => (
+            {listedShips.map((ship) => (
               <button
                 className={`grid w-full grid-cols-[1fr_auto] gap-2 border px-3 py-2 text-left transition ${
                   selectedShipId === ship.id
@@ -232,8 +237,10 @@ export default function Page() {
                 }`}
                 key={ship.id}
                 onClick={() => {
-                  setSelectedShipId(ship.id);
-                  setCaptainShipId(ship.id);
+                  if (role === "command") {
+                    setSelectedShipId(ship.id);
+                    setCaptainShipId(ship.id);
+                  }
                 }}
                 type="button"
               >
@@ -435,25 +442,14 @@ export default function Page() {
             <div className="space-y-5">
               <section className="border border-white/10 bg-white/[0.03] p-4">
                 <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">Captain Console</h2>
-                <select
-                  className="mt-3 w-full border border-white/10 bg-[#071013] px-3 py-2 text-sm"
-                  onChange={(event) => {
-                    setCaptainShipId(event.target.value);
-                    setSelectedShipId(event.target.value);
-                  }}
-                  value={captainShipId}
-                >
-                  {snapshot.ships.map((ship) => (
-                    <option key={ship.id} value={ship.id}>
-                      {ship.name}
-                    </option>
-                  ))}
-                </select>
                 {captainShip && (
-                  <div className="mt-3 text-sm text-slate-300">
+                  <div className="mt-3 border border-white/10 bg-[#071013] p-3 text-sm text-slate-300">
                     {captainShip.name} - {captainShip.status} - {captainShip.fuelTons.toFixed(0)} tons fuel
                   </div>
                 )}
+                <p className="mt-3 text-xs text-slate-500">
+                  Captain session scoped to {captainShip?.id}. Switch back to Command to inspect another vessel.
+                </p>
               </section>
 
               <section className="border border-white/10 bg-white/[0.03] p-4">

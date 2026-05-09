@@ -33,6 +33,12 @@ const BASE_FUEL_TONS_PER_KM = 0.08;
 const INSUFFICIENT_FUEL_BUFFER = 1.1;
 const HISTORY_INTERVAL_MS = 30_000;
 const HISTORY_WINDOW_MS = 60 * 60 * 1000;
+const STOPPED_STATUSES = new Set<ShipState["status"]>([
+  "arrived",
+  "out_of_fuel",
+  "stranded",
+  "stopped",
+]);
 
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -106,6 +112,7 @@ export class SimulatorStore {
   private restrictedZones: RestrictedZone[] = [];
   private alerts: Alert[] = [];
   private directives: Directive[] = [];
+  private pendingDirectiveIds = new Set<string>();
   private weatherSamples: WeatherSample[] = [];
   private history: HistorySnapshot[] = [];
   private keyEvents: string[] = [];
@@ -129,12 +136,14 @@ export class SimulatorStore {
         position: ship.position,
         previousPosition: ship.position,
         speedKnots: ship.speed,
+        cruisingSpeedKnots: ship.speed,
         headingDegrees: ship.heading,
         destinationPortId: ship.destination,
         fuelTons: ship.fuel,
         cargo: ship.cargo,
         status: ship.status,
         currentRoute: estimateDirectRoute(ship.shipId, ship.position, destination.position),
+        activeWaypointIndex: 1,
         lastUpdateAt: Date.now(),
         weatherMultiplier: 1,
       };
@@ -225,6 +234,7 @@ export class SimulatorStore {
     this.lastTickAt = now;
     this.tickCount += 1;
 
+    this.applyQueuedAcceptedDirectives();
     this.ships = this.ships.map((ship) => this.advanceShip(ship, deltaSeconds, now));
     this.checkProximity();
     this.captureHistory(now);
@@ -254,6 +264,7 @@ export class SimulatorStore {
         previousPosition: ship.position,
         speedKnots: 0,
         status: "arrived",
+        activeWaypointIndex: Math.max(ship.activeWaypointIndex, ship.currentRoute.waypoints.length - 1),
         lastUpdateAt: now,
       };
     }
@@ -277,35 +288,32 @@ export class SimulatorStore {
       };
     }
 
-    const insideRestrictedZone = this.restrictedZones.some(
-      (zone) => zone.active && pointInPolygon(ship.position, zone.polygon),
-    );
-
-    if (insideRestrictedZone) {
-      this.upsertAlert(
-        "restricted_zone_breach",
-        "critical",
-        [ship.id],
-        `${ship.name} is inside an active restricted zone.`,
-        `breach:${ship.id}`,
-      );
-    }
-
-    const headingDegrees = ship.status === "stopped" ? ship.headingDegrees : bearingDegrees(ship.position, destination.position);
-    const distanceKm = ship.status === "stopped" ? 0 : knotsToKmPerSecond(ship.speedKnots) * deltaSeconds;
+    const canMove = !STOPPED_STATUSES.has(ship.status);
+    const routeWaypoints =
+      ship.currentRoute.valid && ship.currentRoute.waypoints.length >= 2
+        ? ship.currentRoute.waypoints
+        : [ship.position, destination.position];
+    const waypointIndex = Math.min(Math.max(1, ship.activeWaypointIndex), routeWaypoints.length - 1);
+    const targetWaypoint = routeWaypoints[waypointIndex] ?? destination.position;
+    const distanceToWaypointKm = haversineDistanceKm(ship.position, targetWaypoint);
+    const headingDegrees = canMove ? bearingDegrees(ship.position, targetWaypoint) : ship.headingDegrees;
+    const availableDistanceKm = canMove ? knotsToKmPerSecond(ship.speedKnots) * deltaSeconds : 0;
+    const distanceKm = Math.min(availableDistanceKm, distanceToWaypointKm || distanceToDestinationKm);
     const movedPosition = clampToBoundingBox(
-      movePosition(ship.position, headingDegrees, Math.min(distanceKm, distanceToDestinationKm)),
+      movePosition(ship.position, headingDegrees, distanceKm),
       this.seed.boundingBox,
     );
     const inNavigableWater = pointInPolygon(movedPosition, this.seed.navigableWater);
     const nextPosition = inNavigableWater ? movedPosition : ship.position;
-    const fuelBurn = distanceKm * BASE_FUEL_TONS_PER_KM * ship.weatherMultiplier;
+    const actualDistanceKm = inNavigableWater ? distanceKm : 0;
+    const fuelBurn = actualDistanceKm * BASE_FUEL_TONS_PER_KM * ship.weatherMultiplier;
     const remainingFuel = Math.max(0, ship.fuelTons - fuelBurn);
     const remainingRouteFuel = distanceToDestinationKm * BASE_FUEL_TONS_PER_KM * INSUFFICIENT_FUEL_BUFFER;
     let status = ship.status === "rerouting" ? "normal" : ship.status;
 
     if (!inNavigableWater) {
       status = "stranded";
+      ship = { ...ship, speedKnots: 0 };
       this.upsertAlert(
         "stranded",
         "critical",
@@ -313,7 +321,7 @@ export class SimulatorStore {
         `${ship.name} cannot advance without leaving navigable water.`,
         `stranded:${ship.id}`,
       );
-    } else if (remainingFuel < remainingRouteFuel && status !== "distressed") {
+    } else if (canMove && remainingFuel < remainingRouteFuel && status !== "distressed") {
       status = "insufficient_fuel";
       this.upsertAlert(
         "insufficient_fuel",
@@ -326,14 +334,21 @@ export class SimulatorStore {
       status = "normal";
     }
 
+    this.syncRestrictedZoneAlerts(ship, nextPosition);
+
     return {
       ...ship,
       position: nextPosition,
       previousPosition: ship.position,
       headingDegrees,
       fuelTons: remainingFuel,
+      speedKnots: status === "stranded" ? 0 : ship.speedKnots,
       status,
       currentRoute: estimateDirectRoute(ship.id, nextPosition, destination.position),
+      activeWaypointIndex:
+        distanceToWaypointKm <= Math.max(distanceKm, 0.5)
+          ? Math.min(waypointIndex + 1, routeWaypoints.length - 1)
+          : waypointIndex,
       lastUpdateAt: now,
     };
   }
@@ -395,8 +410,8 @@ export class SimulatorStore {
     directive.status = responseType === "ACCEPT" ? "accepted" : "distress_escalated";
 
     if (responseType === "ACCEPT") {
-      this.applyAcceptedDirective(directive);
-      this.keyEvents.push(`${ship.name} accepted directive ${directive.type}.`);
+      this.pendingDirectiveIds.add(directive.id);
+      this.keyEvents.push(`${ship.name} accepted directive ${directive.type}; queued for next tick.`);
     } else {
       this.ships = this.ships.map((candidate) =>
         candidate.id === ship.id ? { ...candidate, status: "distressed" } : candidate,
@@ -412,6 +427,16 @@ export class SimulatorStore {
     }
   }
 
+  private applyQueuedAcceptedDirectives(): void {
+    if (this.pendingDirectiveIds.size === 0) {
+      return;
+    }
+
+    const queuedDirectives = this.directives.filter((directive) => this.pendingDirectiveIds.has(directive.id));
+    queuedDirectives.forEach((directive) => this.applyAcceptedDirective(directive));
+    this.pendingDirectiveIds.clear();
+  }
+
   private applyAcceptedDirective(directive: Directive): void {
     this.ships = this.ships.map((ship) => {
       if (ship.id !== directive.targetShipId) {
@@ -423,13 +448,18 @@ export class SimulatorStore {
       }
 
       if (directive.type === "RESUME_COURSE") {
-        return { ...ship, status: "normal", speedKnots: Math.max(ship.speedKnots, 10) };
+        return { ...ship, status: "normal", speedKnots: Math.max(ship.cruisingSpeedKnots, 1) };
       }
 
       if (directive.type === "CHANGE_SPEED") {
         const speedKnots = Number(directive.payload.speedKnots);
         return Number.isFinite(speedKnots)
-          ? { ...ship, status: "normal", speedKnots: Math.max(0, Math.min(28, speedKnots)) }
+          ? {
+              ...ship,
+              status: "normal",
+              speedKnots: Math.max(0, Math.min(28, speedKnots)),
+              cruisingSpeedKnots: Math.max(0, Math.min(28, speedKnots)),
+            }
           : ship;
       }
 
@@ -446,6 +476,7 @@ export class SimulatorStore {
           destinationPortId,
           status: "rerouting",
           currentRoute: estimateDirectRoute(ship.id, ship.position, destination.position),
+          activeWaypointIndex: 1,
         };
       }
 
@@ -479,7 +510,7 @@ export class SimulatorStore {
           "critical",
           [ship.id],
           `${ship.name} is already inside new zone ${zone.name}.`,
-          `breach:${ship.id}:${zone.id}`,
+          this.breachSourceId(ship.id, zone.id),
         );
 
         return { ...ship, status: "rerouting" };
@@ -516,6 +547,31 @@ export class SimulatorStore {
         }
       }
     }
+  }
+
+  private syncRestrictedZoneAlerts(ship: ShipState, position: LatLng): void {
+    this.restrictedZones
+      .filter((zone) => zone.active)
+      .forEach((zone) => {
+        const sourceEventId = this.breachSourceId(ship.id, zone.id);
+
+        if (pointInPolygon(position, zone.polygon)) {
+          this.upsertAlert(
+            "restricted_zone_breach",
+            "critical",
+            [ship.id],
+            `${ship.name} is inside restricted zone ${zone.name}.`,
+            sourceEventId,
+          );
+          return;
+        }
+
+        this.resolveAlert(sourceEventId);
+      });
+  }
+
+  private breachSourceId(shipId: string, zoneId: string): string {
+    return `breach:${shipId}:${zoneId}`;
   }
 
   private upsertAlert(

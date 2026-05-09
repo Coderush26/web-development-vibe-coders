@@ -94,12 +94,14 @@ export type ShipState = {
   position: LatLng;
   previousPosition: LatLng;
   speedKnots: number;
+  cruisingSpeedKnots: number;
   headingDegrees: number;
   destinationPortId: string;
   fuelTons: number;
   cargo: string;
   status: ShipStatus;
   currentRoute: RoutePlan;
+  activeWaypointIndex: number;
   lastUpdateAt: number;
   weatherMultiplier: number;
 };
