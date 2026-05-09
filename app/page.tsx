@@ -149,7 +149,6 @@ export default function Page() {
   );
   const [now, setNow] = useState(0);
   const [connectionState, setConnectionState] = useState("connecting");
-  const [streamLagMs, setStreamLagMs] = useState(0);
   const [playbackIndex, setPlaybackIndex] = useState<number | null>(null);
   const latestVersionRef = useRef(-1);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -235,7 +234,6 @@ export default function Page() {
 
       latestVersionRef.current = nextSnapshot.stateVersion;
       setSnapshot(nextSnapshot);
-      setStreamLagMs(Math.max(0, Date.now() - streamEvent.sentAt));
       setConnectionState("live");
     });
     source.onerror = () => setConnectionState("reconnecting");
@@ -759,9 +757,6 @@ export default function Page() {
             </span>
             <span className="hidden rounded-sm border border-white/8 bg-white/4 px-2 py-1 text-[10px] text-slate-400 md:inline">
               {snapshot.metrics.connectedViewers}v
-            </span>
-            <span className="hidden rounded-sm border border-white/8 bg-white/4 px-2 py-1 text-[10px] text-slate-400 sm:inline">
-              <span className="text-cyan-300">{streamLagMs}ms</span>
             </span>
             <ThemeToggle className="flex h-6 w-6 items-center justify-center rounded text-slate-400 transition-colors hover:bg-white/8 hover:text-tac-text-hi" />
             <div className="flex overflow-hidden rounded-sm border border-white/10">

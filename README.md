@@ -135,3 +135,6 @@ pnpm verify:realtime
 - Runtime state is in-memory only — restarting the server resets all ships, alerts, zones, directives, and history.
 - Distress analysis uses Grok (`grok-latest` via xAI) when `XAI_API_KEY` is set; automatically falls back to local rules on missing key or API failure.
 - Open-Meteo is the default weather provider. Polling at 10-minute intervals is intentional — the free tier updates hourly, so more frequent polling returns identical data.
+- The seeded navigable-water polygon is intentionally coarse. The simulator layers local coastal land exclusions over it so routes do not cut across the UAE/Oman land bridge or Fujairah/Oman coast.
+- Seeded red dashed polygons are intentional restricted/no-sail areas used by the scenario: Hormuz, Musandam, Qeshm, Abu Musa, and Farsi.
+- Routes are computed from in-memory state. If coastline or restricted-zone constraints change during development, restart the dev server to reset the singleton simulator store.
