@@ -122,6 +122,56 @@ export default function Page() {
   const [drawingMode, setDrawingMode] = useState(false);
   const [draftPolygon, setDraftPolygon] = useState<LatLng[]>([]);
   const [mouseMapPos, setMouseMapPos] = useState<[number, number] | null>(null);
+  const seenCriticalAlertIdsRef = useRef<Set<string>>(new Set());
+  const audioContextRef = useRef<AudioContext | null>(null);
+
+  function playCriticalAlertCue() {
+    const windowWithWebkitAudio = window as Window & {
+      webkitAudioContext?: typeof AudioContext;
+    };
+    const AudioContextCtor =
+      window.AudioContext ?? windowWithWebkitAudio.webkitAudioContext;
+
+    if (!AudioContextCtor) {
+      return;
+    }
+
+    try {
+      const context = audioContextRef.current ?? new AudioContextCtor();
+      audioContextRef.current = context;
+
+      if (context.state === "suspended") {
+        void context.resume();
+      }
+
+      const start = context.currentTime + 0.01;
+      const tonePlan = [
+        { freq: 900, at: 0, duration: 0.12 },
+        { freq: 620, at: 0.16, duration: 0.16 },
+      ];
+
+      tonePlan.forEach((tone) => {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = "square";
+        oscillator.frequency.setValueAtTime(tone.freq, start + tone.at);
+
+        gain.gain.setValueAtTime(0.0001, start + tone.at);
+        gain.gain.exponentialRampToValueAtTime(0.09, start + tone.at + 0.02);
+        gain.gain.exponentialRampToValueAtTime(
+          0.0001,
+          start + tone.at + tone.duration,
+        );
+
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(start + tone.at);
+        oscillator.stop(start + tone.at + tone.duration);
+      });
+    } catch {
+      // Ignore cue errors to avoid interrupting dashboard rendering.
+    }
+  }
 
   useEffect(() => {
     const source = new EventSource("/api/sim/stream");
@@ -151,6 +201,14 @@ export default function Page() {
     return () => window.clearInterval(frame);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (audioContextRef.current) {
+        void audioContextRef.current.close();
+      }
+    };
+  }, []);
+
   const visibleShips = useMemo(() => {
     if (!snapshot) {
       return [];
@@ -175,6 +233,31 @@ export default function Page() {
       ? snapshot.history[playbackCursor]
       : undefined;
   const inPlayback = Boolean(playbackFrame);
+
+  useEffect(() => {
+    if (!snapshot || inPlayback) {
+      return;
+    }
+
+    const activeCriticalAlerts = snapshot.alerts.filter(
+      (alert) =>
+        alert.severity === "critical" &&
+        !alert.resolvedAt &&
+        !alert.acknowledgedAt,
+    );
+    let hasNewCriticalAlert = false;
+
+    activeCriticalAlerts.forEach((alert) => {
+      if (!seenCriticalAlertIdsRef.current.has(alert.id)) {
+        seenCriticalAlertIdsRef.current.add(alert.id);
+        hasNewCriticalAlert = true;
+      }
+    });
+
+    if (hasNewCriticalAlert) {
+      playCriticalAlertCue();
+    }
+  }, [inPlayback, snapshot]);
 
   const renderedShips = useMemo(() => {
     if (!snapshot) {
@@ -708,7 +791,7 @@ export default function Page() {
 
             {/* Routes — only selected ship */}
             {renderedShips
-              .filter((ship) => ship.id === selectedShipId)
+              .filter((ship) => ship.id === selectedShipId && ship.currentRoute.valid)
               .map((ship) => {
                 const pts = ship.currentRoute.waypoints
                   .map((p) => project(p).join(","))

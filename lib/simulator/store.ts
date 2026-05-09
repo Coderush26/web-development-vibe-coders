@@ -11,7 +11,6 @@ import { getFleetSeed } from "@/lib/fleet-seed";
 import {
   calculateFuelBurnTons,
   calculateTickMovementBudgetKm,
-  estimateDirectRoute,
   hasInsufficientFuel,
   HISTORY_INTERVAL_MS,
   HISTORY_WINDOW_MS,
@@ -21,6 +20,7 @@ import {
   SIM_TICK_MS,
   updateRemainingRoute,
 } from "@/lib/simulator/core";
+import { computeRoutePlan, routeIntersectsZone } from "@/lib/simulator/routing";
 import type {
   Alert,
   AlertSeverity,
@@ -129,7 +129,13 @@ export class SimulatorStore {
         fuelTons: ship.fuel,
         cargo: ship.cargo,
         status: ship.status,
-        currentRoute: estimateDirectRoute(ship.shipId, ship.position, destination.position),
+        currentRoute: computeRoutePlan({
+          shipId: ship.shipId,
+          start: ship.position,
+          destination: destination.position,
+          navigableWater: this.seed.navigableWater,
+          restrictedZones: this.restrictedZones,
+        }),
         activeWaypointIndex: 1,
         lastUpdateAt: Date.now(),
         weatherMultiplier: 1,
@@ -483,7 +489,14 @@ export class SimulatorStore {
       }
 
       if (directive.type === "RESUME_COURSE") {
-        return { ...ship, status: "normal", speedKnots: Math.max(ship.cruisingSpeedKnots, 1) };
+        return this.recomputeRouteForShip(
+          {
+            ...ship,
+            status: "normal",
+            speedKnots: Math.max(ship.cruisingSpeedKnots, 1),
+          },
+          "resumed course and recomputed route.",
+        );
       }
 
       if (directive.type === "CHANGE_SPEED") {
@@ -506,13 +519,14 @@ export class SimulatorStore {
           return ship;
         }
 
-        return {
+        return this.recomputeRouteForShip(
+          {
           ...ship,
           destinationPortId,
           status: "rerouting",
-          currentRoute: estimateDirectRoute(ship.id, ship.position, destination.position),
-          activeWaypointIndex: 1,
-        };
+          },
+          `rerouted to ${destination.name}.`,
+        );
       }
 
       return ship;
@@ -548,7 +562,17 @@ export class SimulatorStore {
           this.breachSourceId(ship.id, zone.id),
         );
 
-        return { ...ship, status: "rerouting" };
+        return this.recomputeRouteForShip(
+          { ...ship, status: "rerouting" },
+          `${ship.name} forced reroute after entering ${zone.name}.`,
+        );
+      }
+
+      if (routeIntersectsZone(ship.currentRoute.waypoints, polygon)) {
+        return this.recomputeRouteForShip(
+          { ...ship, status: "rerouting" },
+          `${ship.name} route intersects ${zone.name}; auto-rerouting.`,
+        );
       }
 
       return ship;
@@ -573,7 +597,21 @@ export class SimulatorStore {
           ? { ...alert, resolvedAt: now }
           : alert,
       );
+      return;
     }
+
+    this.ships = this.ships.map((ship) => {
+      if (
+        routeIntersectsZone(ship.currentRoute.waypoints, zone.polygon) ||
+        pointInPolygon(ship.position, zone.polygon)
+      ) {
+        return this.recomputeRouteForShip(
+          { ...ship, status: "rerouting" },
+          `${ship.name} rerouted after ${zone.name} activation.`,
+        );
+      }
+      return ship;
+    });
   }
 
   private acknowledgeAlert(alertId: string): void {
@@ -655,6 +693,51 @@ export class SimulatorStore {
       sourceEventId,
     });
     this.keyEvents.push(message);
+  }
+
+  private recomputeRouteForShip(ship: ShipState, eventMessage?: string): ShipState {
+    const destination = this.seed.ports.find((port) => port.id === ship.destinationPortId);
+    if (!destination) {
+      return ship;
+    }
+
+    const nextRoute = computeRoutePlan({
+      shipId: ship.id,
+      start: ship.position,
+      destination: destination.position,
+      navigableWater: this.seed.navigableWater,
+      restrictedZones: this.restrictedZones,
+    });
+
+    if (!nextRoute.valid) {
+      this.upsertAlert(
+        "stranded",
+        "critical",
+        [ship.id],
+        `${ship.name} is stranded: ${nextRoute.reason ?? "No safe route available."}`,
+        `stranded:${ship.id}`,
+      );
+      if (eventMessage) {
+        this.keyEvents.push(eventMessage);
+      }
+      return {
+        ...ship,
+        status: "stranded",
+        speedKnots: 0,
+        currentRoute: nextRoute,
+        activeWaypointIndex: 1,
+      };
+    }
+
+    this.resolveAlert(`stranded:${ship.id}`);
+    if (eventMessage) {
+      this.keyEvents.push(eventMessage);
+    }
+    return {
+      ...ship,
+      currentRoute: nextRoute,
+      activeWaypointIndex: 1,
+    };
   }
 
   private resolveAlert(sourceEventId: string): void {
