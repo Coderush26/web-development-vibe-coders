@@ -75,7 +75,8 @@ export default function Page() {
   const [role, setRole] = useState<Role>("command");
   const [selectedShipId, setSelectedShipId] = useState("MV-1");
   const [captainShipId, setCaptainShipId] = useState("MV-1");
-  const [directiveType, setDirectiveType] = useState<DirectiveType>("HOLD_POSITION");
+  const [directiveType, setDirectiveType] =
+    useState<DirectiveType>("HOLD_POSITION");
   const [speedKnots, setSpeedKnots] = useState(12);
   const [destinationPortId, setDestinationPortId] = useState("MCT-1");
   const [distressMessage, setDistressMessage] = useState(
@@ -90,7 +91,9 @@ export default function Page() {
     const source = new EventSource("/api/sim/stream");
 
     source.addEventListener("snapshot", (event) => {
-      const streamEvent = JSON.parse((event as MessageEvent).data) as SimulatorStreamEvent;
+      const streamEvent = JSON.parse(
+        (event as MessageEvent).data,
+      ) as SimulatorStreamEvent;
       const nextSnapshot = streamEvent.snapshot;
 
       if (nextSnapshot.stateVersion <= latestVersionRef.current) {
@@ -119,18 +122,32 @@ export default function Page() {
 
     return snapshot.ships.map((ship) => ({
       ...ship,
-      position: interpolateLatLng(ship.previousPosition, ship.position, (now - ship.lastUpdateAt) / 1000),
+      position: interpolateLatLng(
+        ship.previousPosition,
+        ship.position,
+        (now - ship.lastUpdateAt) / 1000,
+      ),
     }));
   }, [now, snapshot]);
 
-  const selectedShip = visibleShips.find((ship) => ship.id === selectedShipId) ?? visibleShips[0];
-  const captainShip = visibleShips.find((ship) => ship.id === captainShipId) ?? visibleShips[0];
-  const listedShips = role === "command" ? visibleShips : visibleShips.filter((ship) => ship.id === captainShipId);
+  const selectedShip =
+    visibleShips.find((ship) => ship.id === selectedShipId) ?? visibleShips[0];
+  const captainShip =
+    visibleShips.find((ship) => ship.id === captainShipId) ?? visibleShips[0];
+  const listedShips =
+    role === "command"
+      ? visibleShips
+      : visibleShips.filter((ship) => ship.id === captainShipId);
   const pendingCaptainDirectives =
     snapshot?.directives.filter(
-      (directive) => directive.targetShipId === captainShipId && directive.status === "pending",
+      (directive) =>
+        directive.targetShipId === captainShipId &&
+        directive.status === "pending",
     ) ?? [];
-  const activeAlerts = snapshot?.alerts.filter((alert) => !alert.resolvedAt && !alert.acknowledgedAt) ?? [];
+  const activeAlerts =
+    snapshot?.alerts.filter(
+      (alert) => !alert.resolvedAt && !alert.acknowledgedAt,
+    ) ?? [];
 
   function project(point: LatLng): [number, number] {
     if (!snapshot) {
@@ -138,8 +155,13 @@ export default function Page() {
     }
 
     const { boundingBox } = snapshot;
-    const x = ((point[1] - boundingBox.west) / (boundingBox.east - boundingBox.west)) * MAP_WIDTH;
-    const y = ((boundingBox.north - point[0]) / (boundingBox.north - boundingBox.south)) * MAP_HEIGHT;
+    const x =
+      ((point[1] - boundingBox.west) / (boundingBox.east - boundingBox.west)) *
+      MAP_WIDTH;
+    const y =
+      ((boundingBox.north - point[0]) /
+        (boundingBox.north - boundingBox.south)) *
+      MAP_HEIGHT;
 
     return [x, y];
   }
@@ -180,12 +202,16 @@ export default function Page() {
     });
   }
 
-  async function respondToDirective(directiveId: string, responseType: "ACCEPT" | "ESCALATE_DISTRESS") {
+  async function respondToDirective(
+    directiveId: string,
+    responseType: "ACCEPT" | "ESCALATE_DISTRESS",
+  ) {
     await postJson("/api/sim/responses", {
       directiveId,
       shipId: captainShipId,
       responseType,
-      distressMessage: responseType === "ESCALATE_DISTRESS" ? distressMessage : undefined,
+      distressMessage:
+        responseType === "ESCALATE_DISTRESS" ? distressMessage : undefined,
     });
   }
 
@@ -204,10 +230,12 @@ export default function Page() {
       <header className="border-b border-white/10 bg-[#0b1518] px-5 py-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-xl font-semibold tracking-wide">Fleet Crisis Command</h1>
+            <h1 className="text-xl font-semibold tracking-wide">
+              Fleet Crisis Command
+            </h1>
             <p className="text-xs text-slate-400">
-              {snapshot.scenarioName} - {snapshot.metrics.activeShips} ships - tick {snapshot.tick} - v
-              {snapshot.stateVersion}
+              {snapshot.scenarioName} - {snapshot.metrics.activeShips} ships -
+              tick {snapshot.tick} - v{snapshot.stateVersion}
             </p>
           </div>
           <div className="flex items-center gap-2 text-xs">
@@ -217,7 +245,9 @@ export default function Page() {
             <span className="border border-white/10 px-3 py-1 text-slate-300">
               viewers {snapshot.metrics.connectedViewers}
             </span>
-            <span className="border border-white/10 px-3 py-1 text-slate-300">lag {streamLagMs}ms</span>
+            <span className="border border-white/10 px-3 py-1 text-slate-300">
+              lag {streamLagMs}ms
+            </span>
             <div className="flex border border-white/10">
               <button
                 className={`px-3 py-1 ${role === "command" ? "bg-cyan-300 text-slate-950" : "text-slate-300"}`}
@@ -244,8 +274,12 @@ export default function Page() {
       <div className="grid min-h-[calc(100vh-65px)] grid-cols-1 xl:grid-cols-[320px_1fr_360px]">
         <aside className="border-b border-white/10 bg-[#0b1518] p-4 xl:border-b-0 xl:border-r">
           <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">Fleet</h2>
-            <span className="text-xs text-slate-500">{formatTime(snapshot.serverTime)}</span>
+            <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+              Fleet
+            </h2>
+            <span className="text-xs text-slate-500">
+              {formatTime(snapshot.serverTime)}
+            </span>
           </div>
           <div className="max-h-[44vh] space-y-2 overflow-auto pr-1 xl:max-h-[70vh]">
             {listedShips.map((ship) => (
@@ -253,7 +287,7 @@ export default function Page() {
                 className={`grid w-full grid-cols-[1fr_auto] gap-2 border px-3 py-2 text-left transition ${
                   selectedShipId === ship.id
                     ? "border-cyan-300 bg-cyan-300/12"
-                    : "border-white/10 bg-white/[0.03] hover:border-white/25"
+                    : "border-white/10 bg-white/3 hover:border-white/25"
                 }`}
                 key={ship.id}
                 onClick={() => {
@@ -282,36 +316,130 @@ export default function Page() {
         </aside>
 
         <section className="relative min-h-[520px] bg-[#0a1c22]">
-          <svg className="h-full min-h-[520px] w-full" viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`} role="img">
+          <svg
+            className="h-full min-h-[520px] w-full"
+            viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
+            role="img"
+          >
             <defs>
-              <pattern id="grid" width="50" height="50" patternUnits="userSpaceOnUse">
-                <path d="M 50 0 L 0 0 0 50" fill="none" stroke="rgba(148, 163, 184, 0.12)" strokeWidth="1" />
+              <pattern
+                id="grid"
+                width="50"
+                height="50"
+                patternUnits="userSpaceOnUse"
+              >
+                <path
+                  d="M 50 0 L 0 0 0 50"
+                  fill="none"
+                  stroke="rgba(148, 163, 184, 0.12)"
+                  strokeWidth="1"
+                />
               </pattern>
             </defs>
             <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="#08212a" />
             <rect width={MAP_WIDTH} height={MAP_HEIGHT} fill="url(#grid)" />
+            <rect
+              fill="none"
+              height={MAP_HEIGHT}
+              stroke="rgba(103, 232, 249, 0.45)"
+              strokeWidth="2"
+              width={MAP_WIDTH}
+              x={0}
+              y={0}
+            />
             <polygon
               fill="rgba(20, 184, 166, 0.13)"
-              points={snapshot.navigableWater.map((point) => project(point).join(",")).join(" ")}
+              points={snapshot.navigableWater
+                .map((point) => project(point).join(","))
+                .join(" ")}
               stroke="rgba(45, 212, 191, 0.55)"
               strokeWidth="2"
             />
+            {visibleShips.map((ship) => {
+              const routePoints = ship.currentRoute.waypoints
+                .map((point) => project(point).join(","))
+                .join(" ");
+              if (!routePoints) {
+                return null;
+              }
+
+              return (
+                <polyline
+                  fill="none"
+                  key={`route-${ship.id}`}
+                  points={routePoints}
+                  stroke={
+                    ship.id === selectedShipId
+                      ? "rgba(103, 232, 249, 0.95)"
+                      : "rgba(203, 213, 225, 0.45)"
+                  }
+                  strokeDasharray={ship.id === selectedShipId ? "0" : "6 5"}
+                  strokeWidth={ship.id === selectedShipId ? "2.5" : "1.5"}
+                />
+              );
+            })}
             {snapshot.restrictedZones.map((zone) => (
               <polygon
                 fill="rgba(239, 68, 68, 0.22)"
                 key={zone.id}
-                points={zone.polygon.map((point) => project(point).join(",")).join(" ")}
+                points={zone.polygon
+                  .map((point) => project(point).join(","))
+                  .join(" ")}
                 stroke="rgba(248, 113, 113, 0.9)"
                 strokeDasharray="8 6"
                 strokeWidth="2"
               />
             ))}
+            {snapshot.weatherSamples.map((sample) => {
+              const [x, y] = project(sample.position);
+              const adverse = sample.adverse;
+
+              return (
+                <g key={sample.id}>
+                  <circle
+                    cx={x}
+                    cy={y}
+                    fill={
+                      adverse
+                        ? "rgba(244, 63, 94, 0.16)"
+                        : "rgba(34, 211, 238, 0.12)"
+                    }
+                    r={adverse ? 42 : 28}
+                    stroke={
+                      adverse
+                        ? "rgba(251, 113, 133, 0.95)"
+                        : "rgba(103, 232, 249, 0.7)"
+                    }
+                    strokeDasharray={adverse ? "7 5" : "0"}
+                    strokeWidth="1.5"
+                  />
+                  <text
+                    fill={
+                      adverse
+                        ? "rgba(254, 205, 211, 0.95)"
+                        : "rgba(165, 243, 252, 0.95)"
+                    }
+                    fontSize="11"
+                    x={x + 10}
+                    y={y - 10}
+                  >
+                    {adverse ? "adverse +30% fuel" : "clear"}
+                  </text>
+                </g>
+              );
+            })}
             {snapshot.ports.map((port) => {
               const [x, y] = project(port.position);
 
               return (
                 <g key={port.id}>
-                  <rect fill="#d9f99d" height="10" width="10" x={x - 5} y={y - 5} />
+                  <rect
+                    fill="#d9f99d"
+                    height="10"
+                    width="10"
+                    x={x - 5}
+                    y={y - 5}
+                  />
                   <text fill="#d9f99d" fontSize="13" x={x + 8} y={y + 4}>
                     {port.name}
                   </text>
@@ -338,17 +466,31 @@ export default function Page() {
                     stroke={ship.status === "normal" ? "#042f2e" : "#f59e0b"}
                     strokeWidth="2"
                   />
-                  <circle fill="transparent" r="16" stroke={selected ? "#67e8f9" : "transparent"} strokeWidth="2" />
+                  <circle
+                    fill="transparent"
+                    r="16"
+                    stroke={selected ? "#67e8f9" : "transparent"}
+                    strokeWidth="2"
+                  />
                 </g>
               );
             })}
           </svg>
 
           <div className="absolute bottom-4 left-4 right-4 flex flex-wrap gap-2 text-xs">
-            <span className="border border-white/10 bg-black/30 px-3 py-1">SSE live sync - 1 Hz backend tick</span>
-            <span className="border border-white/10 bg-black/30 px-3 py-1">Client interpolation active</span>
             <span className="border border-white/10 bg-black/30 px-3 py-1">
-              {snapshot.restrictedZones.length} zones - {activeAlerts.length} active alerts
+              SSE live sync - 1 Hz backend tick
+            </span>
+            <span className="border border-white/10 bg-black/30 px-3 py-1">
+              Client interpolation active
+            </span>
+            <span className="border border-white/10 bg-black/30 px-3 py-1">
+              Routes {visibleShips.length} - weather samples{" "}
+              {snapshot.weatherSamples.length}
+            </span>
+            <span className="border border-white/10 bg-black/30 px-3 py-1">
+              {snapshot.restrictedZones.length} zones - {activeAlerts.length}{" "}
+              active alerts
             </span>
           </div>
         </section>
@@ -356,8 +498,10 @@ export default function Page() {
         <aside className="border-t border-white/10 bg-[#0b1518] p-4 xl:border-l xl:border-t-0">
           {role === "command" ? (
             <div className="space-y-5">
-              <section className="border border-white/10 bg-white/[0.03] p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">Selected Ship</h2>
+              <section className="border border-white/10 bg-white/3 p-4">
+                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+                  Selected Ship
+                </h2>
                 {selectedShip && (
                   <dl className="mt-3 grid grid-cols-2 gap-3 text-sm">
                     <div>
@@ -384,12 +528,19 @@ export default function Page() {
                 )}
               </section>
 
-              <form className="border border-white/10 bg-white/[0.03] p-4" onSubmit={issueDirective}>
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">Directive</h2>
+              <form
+                className="border border-white/10 bg-white/3 p-4"
+                onSubmit={issueDirective}
+              >
+                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+                  Directive
+                </h2>
                 <div className="mt-3 grid gap-3">
                   <select
                     className="border border-white/10 bg-[#071013] px-3 py-2 text-sm"
-                    onChange={(event) => setDirectiveType(event.target.value as DirectiveType)}
+                    onChange={(event) =>
+                      setDirectiveType(event.target.value as DirectiveType)
+                    }
                     value={directiveType}
                   >
                     {Object.entries(directiveLabels).map(([value, label]) => (
@@ -403,7 +554,9 @@ export default function Page() {
                       className="border border-white/10 bg-[#071013] px-3 py-2 text-sm"
                       max={28}
                       min={0}
-                      onChange={(event) => setSpeedKnots(Number(event.target.value))}
+                      onChange={(event) =>
+                        setSpeedKnots(Number(event.target.value))
+                      }
                       type="number"
                       value={speedKnots}
                     />
@@ -411,7 +564,9 @@ export default function Page() {
                   {directiveType === "REROUTE_PORT" && (
                     <select
                       className="border border-white/10 bg-[#071013] px-3 py-2 text-sm"
-                      onChange={(event) => setDestinationPortId(event.target.value)}
+                      onChange={(event) =>
+                        setDestinationPortId(event.target.value)
+                      }
                       value={destinationPortId}
                     >
                       {snapshot.ports.map((port) => (
@@ -421,7 +576,10 @@ export default function Page() {
                       ))}
                     </select>
                   )}
-                  <button className="bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950" type="submit">
+                  <button
+                    className="bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950"
+                    type="submit"
+                  >
                     Issue to {selectedShip?.name}
                   </button>
                   <button
@@ -434,17 +592,30 @@ export default function Page() {
                 </div>
               </form>
 
-              <section className="border border-white/10 bg-white/[0.03] p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">Alerts</h2>
+              <section className="border border-white/10 bg-white/3 p-4">
+                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+                  Alerts
+                </h2>
                 <div className="mt-3 max-h-72 space-y-2 overflow-auto">
-                  {activeAlerts.length === 0 && <p className="text-sm text-slate-500">No unacknowledged alerts.</p>}
+                  {activeAlerts.length === 0 && (
+                    <p className="text-sm text-slate-500">
+                      No unacknowledged alerts.
+                    </p>
+                  )}
                   {activeAlerts.map((alert) => (
-                    <div className={`border p-3 text-sm ${severityClass(alert.severity)}`} key={alert.id}>
+                    <div
+                      className={`border p-3 text-sm ${severityClass(alert.severity)}`}
+                      key={alert.id}
+                    >
                       <div className="flex items-start justify-between gap-3">
                         <p>{alert.message}</p>
                         <button
                           className="border border-white/20 px-2 py-1 text-xs"
-                          onClick={() => postJson("/api/sim/alerts/ack", { alertId: alert.id })}
+                          onClick={() =>
+                            postJson("/api/sim/alerts/ack", {
+                              alertId: alert.id,
+                            })
+                          }
                           type="button"
                         >
                           Ack
@@ -460,46 +631,70 @@ export default function Page() {
             </div>
           ) : (
             <div className="space-y-5">
-              <section className="border border-white/10 bg-white/[0.03] p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">Captain Console</h2>
+              <section className="border border-white/10 bg-white/3 p-4">
+                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+                  Captain Console
+                </h2>
                 {captainShip && (
                   <div className="mt-3 border border-white/10 bg-[#071013] p-3 text-sm text-slate-300">
-                    {captainShip.name} - {captainShip.status} - {captainShip.fuelTons.toFixed(0)} tons fuel
+                    {captainShip.name} - {captainShip.status} -{" "}
+                    {captainShip.fuelTons.toFixed(0)} tons fuel
                   </div>
                 )}
                 <p className="mt-3 text-xs text-slate-500">
-                  Captain session scoped to {captainShip?.id}. Switch back to Command to inspect another vessel.
+                  Captain session scoped to {captainShip?.id}. Switch back to
+                  Command to inspect another vessel.
                 </p>
               </section>
 
-              <section className="border border-white/10 bg-white/[0.03] p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">Pending Directives</h2>
+              <section className="border border-white/10 bg-white/3 p-4">
+                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+                  Pending Directives
+                </h2>
                 <div className="mt-3 space-y-3">
                   {pendingCaptainDirectives.length === 0 && (
-                    <p className="text-sm text-slate-500">No directives awaiting response.</p>
+                    <p className="text-sm text-slate-500">
+                      No directives awaiting response.
+                    </p>
                   )}
                   {pendingCaptainDirectives.map((directive) => (
-                    <div className="border border-white/10 bg-[#071013] p-3" key={directive.id}>
+                    <div
+                      className="border border-white/10 bg-[#071013] p-3"
+                      key={directive.id}
+                    >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium">{directiveLabels[directive.type]}</span>
-                        <span className="text-xs text-slate-500">{formatTime(directive.issuedAt)}</span>
+                        <span className="text-sm font-medium">
+                          {directiveLabels[directive.type]}
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          {formatTime(directive.issuedAt)}
+                        </span>
                       </div>
                       <textarea
                         className="mt-3 h-20 w-full border border-white/10 bg-black/25 p-2 text-sm text-slate-100"
-                        onChange={(event) => setDistressMessage(event.target.value)}
+                        onChange={(event) =>
+                          setDistressMessage(event.target.value)
+                        }
                         value={distressMessage}
                       />
                       <div className="mt-3 grid grid-cols-2 gap-2">
                         <button
                           className="bg-emerald-300 px-3 py-2 text-sm font-semibold text-slate-950"
-                          onClick={() => respondToDirective(directive.id, "ACCEPT")}
+                          onClick={() =>
+                            respondToDirective(directive.id, "ACCEPT")
+                          }
                           type="button"
                         >
                           Accept
                         </button>
                         <button
                           className="border border-red-300/50 px-3 py-2 text-sm text-red-100"
-                          onClick={() => respondToDirective(directive.id, "ESCALATE_DISTRESS")}
+                          onClick={() =>
+                            respondToDirective(
+                              directive.id,
+                              "ESCALATE_DISTRESS",
+                            )
+                          }
                           type="button"
                         >
                           Escalate
@@ -510,10 +705,13 @@ export default function Page() {
                 </div>
               </section>
 
-              <section className="border border-white/10 bg-white/[0.03] p-4">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">Visible Zones</h2>
+              <section className="border border-white/10 bg-white/3 p-4">
+                <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
+                  Visible Zones
+                </h2>
                 <p className="mt-3 text-sm text-slate-400">
-                  Captains can see {snapshot.restrictedZones.length} active command zones and cannot edit them.
+                  Captains can see {snapshot.restrictedZones.length} active
+                  command zones and cannot edit them.
                 </p>
               </section>
             </div>
