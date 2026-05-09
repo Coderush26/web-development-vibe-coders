@@ -22,6 +22,7 @@ import {
 } from "@/lib/simulator/core";
 import { analyzeDistressMessage, formatDistressAnalysis } from "@/lib/simulator/distress";
 import { computeRoutePlan, routeIntersectsZone } from "@/lib/simulator/routing";
+import { estimateDirectRoute } from "@/lib/simulator/core";
 import { fetchWeatherSamples } from "@/lib/simulator/weather";
 import type {
   Alert,
@@ -32,6 +33,7 @@ import type {
   HistorySnapshot,
   LatLng,
   RestrictedZone,
+  ShipAssistance,
   ShipState,
   SimulatorCommand,
   SimulatorSnapshot,
@@ -46,6 +48,15 @@ const WEATHER_REFRESH_MS = 10 * 60 * 1000;
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
+
+// How many seconds ahead to project ships for predictive alerts
+const PREDICTIVE_HORIZON_SECONDS = 300;
+// Minimum fuel remaining ratio below which predictive shortfall fires
+const PREDICTIVE_FUEL_RATIO = 0.15;
+// Completion range for ship-to-ship assistance (km)
+const ASSISTANCE_COMPLETION_KM = 2.5;
+// Fuel transferred per assistance completion (tons)
+const FUEL_TRANSFER_TONS = 500;
 
 export class SimulatorStore {
   private readonly seed = getFleetSeed();
@@ -64,8 +75,12 @@ export class SimulatorStore {
   private weatherTimer?: NodeJS.Timeout;
   private lastTickAt = Date.now();
   private lastHistoryAt = 0;
+  private assistanceMissions: ShipAssistance[] = [];
 
   constructor() {
+    // Zones MUST be seeded before ships so initial routes can avoid them.
+    this.seedRestrictedZones();
+
     this.ships = this.seed.fleet.map((ship) => {
       const destination = this.seed.ports.find((port) => port.id === ship.destination);
 
@@ -90,7 +105,7 @@ export class SimulatorStore {
           start: ship.position,
           destination: destination.position,
           navigableWater: this.seed.navigableWater,
-          restrictedZones: this.restrictedZones,
+          restrictedZones: this.restrictedZones,   // now populated
           weatherSamples: this.weatherSamples,
         }),
         activeWaypointIndex: 1,
@@ -110,7 +125,134 @@ export class SimulatorStore {
       },
     ];
 
+    // Now that ships exist, check which start inside a seeded zone.
+    this.checkInitialZoneBreaches();
     this.start();
+  }
+
+  private seedRestrictedZones(): void {
+    const now = Date.now();
+
+    // Zone 1 — Hormuz Strait Iranian Military Zone
+    // Covers the eastern Hormuz strait and Larak Island area.
+    // Western boundary kept east of Bandar Abbas port (lng 56.27) so the port remains accessible.
+    this.restrictedZones.push({
+      id: "seed-zone-hormuz",
+      name: "Hormuz Military Exclusion",
+      polygon: [
+        [26.88, 56.40],
+        [27.30, 56.35],
+        [27.72, 56.40],
+        [27.68, 57.25],
+        [27.30, 57.50],
+        [27.00, 57.15],
+        [26.88, 56.65],
+        [26.88, 56.40],
+      ] as LatLng[],
+      createdBy: "command",
+      createdAt: now,
+      updatedAt: now,
+      active: true,
+      editable: true,
+    });
+
+    // Zone 5 — Musandam Peninsula (land barrier)
+    // The Musandam peninsula (Oman) juts north into the strait. Ships must route around it
+    // via the northern channel (Iranian waters) or the southern channel (UAE/Oman side).
+    this.restrictedZones.push({
+      id: "seed-zone-musandam",
+      name: "Musandam Peninsula",
+      polygon: [
+        [26.05, 55.92],
+        [26.20, 56.20],
+        [26.00, 56.42],
+        [25.78, 56.35],
+        [25.72, 55.95],
+        [26.05, 55.92],
+      ] as LatLng[],
+      createdBy: "command",
+      createdAt: now,
+      updatedAt: now,
+      active: true,
+      editable: false,
+    });
+
+    // Zone 2 — Qeshm Island Exclusion Zone
+    // Qeshm Island (~26.85°N 55.9°E) is an Iranian strategic island used for naval operations.
+    // Ships approaching from the west must route south of this zone.
+    this.restrictedZones.push({
+      id: "seed-zone-qeshm",
+      name: "Qeshm Island Exclusion",
+      polygon: [
+        [26.65, 55.5 ],
+        [27.05, 55.5 ],
+        [27.05, 56.1 ],
+        [26.65, 56.1 ],
+        [26.65, 55.5 ],
+      ] as LatLng[],
+      createdBy: "command",
+      createdAt: now,
+      updatedAt: now,
+      active: true,
+      editable: true,
+    });
+
+    // Zone 3 — Abu Musa Disputed Island Zone
+    // Abu Musa (~25.87°N 55.03°E) is a disputed island claimed by both Iran and UAE.
+    // Vessels must maintain distance from this contested area.
+    this.restrictedZones.push({
+      id: "seed-zone-abumusa",
+      name: "Abu Musa Restricted Area",
+      polygon: [
+        [25.72, 54.88],
+        [26.05, 54.88],
+        [26.05, 55.22],
+        [25.72, 55.22],
+        [25.72, 54.88],
+      ] as LatLng[],
+      createdBy: "command",
+      createdAt: now,
+      updatedAt: now,
+      active: true,
+      editable: true,
+    });
+
+    // Zone 4 — Farsi Island Patrol Zone (Central Gulf)
+    // Iranian-held Farsi Island area. Marks the central Gulf hazard corridor
+    // where several ships (Gharial, Cygnus, Kite) are currently transiting.
+    this.restrictedZones.push({
+      id: "seed-zone-farsi",
+      name: "Farsi Island Patrol Zone",
+      polygon: [
+        [26.3, 53.85],
+        [26.85, 53.85],
+        [26.85, 54.5 ],
+        [26.3,  54.5 ],
+        [26.3,  53.85],
+      ] as LatLng[],
+      createdBy: "command",
+      createdAt: now,
+      updatedAt: now,
+      active: true,
+      editable: true,
+    });
+
+  }
+
+  private checkInitialZoneBreaches(): void {
+    for (const zone of this.restrictedZones) {
+      for (const ship of this.ships) {
+        if (pointInPolygon(ship.position, zone.polygon)) {
+          this.upsertAlert(
+            "restricted_zone_breach",
+            "critical",
+            [ship.id],
+            `${ship.name} is inside ${zone.name} at scenario start.`,
+            this.breachSourceId(ship.id, zone.id),
+          );
+        }
+      }
+    }
   }
 
   start(): void {
@@ -168,6 +310,7 @@ export class SimulatorStore {
       directives: this.directives,
       weatherSamples: this.weatherSamples,
       history: this.history,
+      assistanceMissions: this.assistanceMissions,
       metrics: {
         connectedViewers: this.connectedViewers,
         tickHz: 1000 / SIM_TICK_MS,
@@ -205,6 +348,18 @@ export class SimulatorStore {
       this.weatherSamples = command.samples;
     }
 
+    if (command.type === "select_route") {
+      this.applySelectedRoute(command.shipId, command.waypoints, command.distanceKm, command.estimatedFuelTons, command.weatherExposure as "clear" | "adverse", command.routeLabel);
+    }
+
+    if (command.type === "request_assistance") {
+      this.requestAssistance(command.assistingShipId, command.targetShipId, command.assistanceType);
+    }
+
+    if (command.type === "cancel_assistance") {
+      this.cancelAssistance(command.assistanceId);
+    }
+
     this.stateVersion += 1;
     this.broadcast();
     return this.snapshot();
@@ -219,7 +374,9 @@ export class SimulatorStore {
 
     this.applyQueuedAcceptedDirectives();
     this.ships = this.ships.map((ship) => this.advanceShip(ship, deltaSeconds, now));
+    this.processAssistanceMissions(now);
     this.checkProximity();
+    this.checkPredictiveAlerts();
     this.captureHistory(now);
     this.broadcast();
   }
@@ -778,6 +935,216 @@ export class SimulatorStore {
       currentRoute: nextRoute,
       activeWaypointIndex: 1,
     };
+  }
+
+  private applySelectedRoute(
+    shipId: string,
+    waypoints: LatLng[],
+    distanceKm: number,
+    estimatedFuelTons: number,
+    weatherExposure: "clear" | "adverse",
+    routeLabel: string,
+  ): void {
+    this.ships = this.ships.map((ship) => {
+      if (ship.id !== shipId) return ship;
+      return {
+        ...ship,
+        status: "rerouting",
+        currentRoute: { shipId, waypoints, distanceKm, estimatedFuelTons, weatherExposure, valid: true },
+        activeWaypointIndex: 1,
+      };
+    });
+    const ship = this.ships.find((s) => s.id === shipId);
+    if (ship) {
+      this.keyEvents.push(`${ship.name} route set to ${routeLabel} option.`);
+    }
+  }
+
+  private requestAssistance(assistingShipId: string, targetShipId: string, assistanceType: ShipAssistance["assistanceType"]): void {
+    const assisting = this.ships.find((s) => s.id === assistingShipId);
+    const target = this.ships.find((s) => s.id === targetShipId);
+    if (!assisting || !target) return;
+
+    // Cancel any existing active mission from the same assisting ship
+    this.assistanceMissions = this.assistanceMissions.map((m) =>
+      m.assistingShipId === assistingShipId && (m.status === "en_route" || m.status === "in_progress")
+        ? { ...m, status: "cancelled" as const, completedAt: Date.now() }
+        : m,
+    );
+
+    const mission: ShipAssistance = {
+      id: makeId("assist"),
+      assistingShipId,
+      targetShipId,
+      assistanceType,
+      status: "en_route",
+      createdAt: Date.now(),
+      progressNote: `${assisting.name} en route to ${target.name}.`,
+    };
+    this.assistanceMissions.unshift(mission);
+    this.keyEvents.push(`${assisting.name} dispatched to assist ${target.name} (${assistanceType.replace("_", " ")}).`);
+  }
+
+  private cancelAssistance(assistanceId: string): void {
+    const mission = this.assistanceMissions.find((m) => m.id === assistanceId);
+    if (!mission) return;
+    mission.status = "cancelled";
+    mission.completedAt = Date.now();
+    const assisting = this.ships.find((s) => s.id === mission.assistingShipId);
+    if (assisting) {
+      // Return assisting ship to its original destination route
+      this.ships = this.ships.map((s) =>
+        s.id === mission.assistingShipId ? this.recomputeRouteForShip({ ...s, status: "rerouting" }, `${s.name} returned to assigned route.`) : s,
+      );
+    }
+  }
+
+  private processAssistanceMissions(now: number): void {
+    for (const mission of this.assistanceMissions) {
+      if (mission.status !== "en_route" && mission.status !== "in_progress") continue;
+
+      const assisting = this.ships.find((s) => s.id === mission.assistingShipId);
+      const target = this.ships.find((s) => s.id === mission.targetShipId);
+      if (!assisting || !target) {
+        mission.status = "cancelled";
+        mission.completedAt = now;
+        continue;
+      }
+
+      const distKm = haversineDistanceKm(assisting.position, target.position);
+
+      if (distKm <= ASSISTANCE_COMPLETION_KM) {
+        // Apply assistance effect
+        this.ships = this.ships.map((s) => {
+          if (s.id === mission.targetShipId) {
+            if (mission.assistanceType === "fuel_transfer") {
+              const transferred = Math.min(FUEL_TRANSFER_TONS, assisting.fuelTons * 0.4);
+              return { ...s, fuelTons: s.fuelTons + transferred, status: s.status === "out_of_fuel" ? "normal" : s.status };
+            }
+            if (mission.assistanceType === "medical_aid" && s.status === "distressed") {
+              return { ...s, status: "normal" };
+            }
+            if (mission.assistanceType === "escort") {
+              // Escort: assisting ship tracks target each tick (handled below)
+              return s;
+            }
+          }
+          if (s.id === mission.assistingShipId && mission.assistanceType === "fuel_transfer") {
+            const transferred = Math.min(FUEL_TRANSFER_TONS, s.fuelTons * 0.4);
+            return { ...s, fuelTons: Math.max(0, s.fuelTons - transferred) };
+          }
+          return s;
+        });
+
+        if (mission.assistanceType !== "escort") {
+          mission.status = "completed";
+          mission.completedAt = now;
+          mission.progressNote = `${assisting.name} completed ${mission.assistanceType.replace("_", " ")} for ${target.name}.`;
+          this.keyEvents.push(mission.progressNote);
+          this.upsertAlert("arrival", "info", [mission.assistingShipId, mission.targetShipId], mission.progressNote, `assist-complete:${mission.id}`);
+          // Return assisting ship to its destination
+          this.ships = this.ships.map((s) =>
+            s.id === mission.assistingShipId ? this.recomputeRouteForShip({ ...s, status: "normal" }, undefined) : s,
+          );
+        } else {
+          mission.status = "in_progress";
+          mission.progressNote = `${assisting.name} escorting ${target.name}.`;
+          // Escort: keep assisting ship routing toward target position
+          const escortTarget = this.ships.find((s) => s.id === mission.targetShipId);
+          if (escortTarget) {
+            this.ships = this.ships.map((s) => {
+              if (s.id !== mission.assistingShipId) return s;
+              return {
+                ...s,
+                currentRoute: estimateDirectRoute(s.id, s.position, escortTarget.position),
+                activeWaypointIndex: 1,
+                status: "rerouting",
+              };
+            });
+          }
+        }
+      } else {
+        // En route — steer assisting ship toward target's current position
+        const liveTarget = this.ships.find((s) => s.id === mission.targetShipId);
+        if (liveTarget) {
+          this.ships = this.ships.map((s) => {
+            if (s.id !== mission.assistingShipId) return s;
+            return {
+              ...s,
+              currentRoute: estimateDirectRoute(s.id, s.position, liveTarget.position),
+              activeWaypointIndex: 1,
+            };
+          });
+        }
+        mission.progressNote = `${assisting.name} en route to ${target.name} — ${distKm.toFixed(1)} km away.`;
+      }
+    }
+  }
+
+  private checkPredictiveAlerts(): void {
+    const activeZones = this.restrictedZones.filter((z) => z.active);
+
+    for (const ship of this.ships) {
+      if (ship.status === "stopped" || ship.status === "arrived" || ship.status === "out_of_fuel" || ship.status === "stranded") {
+        this.resolveAlert(`pred-zone:${ship.id}`);
+        this.resolveAlert(`pred-fuel:${ship.id}`);
+        continue;
+      }
+
+      // Project position PREDICTIVE_HORIZON_SECONDS ahead
+      const speedKmPerSec = (ship.speedKnots * 1.852) / 3600;
+      const projectedDistKm = speedKmPerSec * PREDICTIVE_HORIZON_SECONDS;
+      const projectedPos: LatLng = [
+        ship.position[0] + (Math.cos((ship.headingDegrees * Math.PI) / 180) * projectedDistKm) / 111.32,
+        ship.position[1] +
+          (Math.sin((ship.headingDegrees * Math.PI) / 180) * projectedDistKm) /
+            (111.32 * Math.cos((ship.position[0] * Math.PI) / 180)),
+      ];
+
+      // Check zone entry — sample 8 interpolated positions between now and projected
+      const projSamples: LatLng[] = Array.from({ length: 8 }, (_, i) => {
+        const t = (i + 1) / 8;
+        return [
+          ship.position[0] + (projectedPos[0] - ship.position[0]) * t,
+          ship.position[1] + (projectedPos[1] - ship.position[1]) * t,
+        ] as LatLng;
+      });
+      const predictedZone = activeZones.find((z) => {
+        const alreadyBreaching = this.alerts.some(
+          (a) => a.sourceEventId === this.breachSourceId(ship.id, z.id) && !a.resolvedAt,
+        );
+        return !alreadyBreaching && projSamples.some((pt) => pointInPolygon(pt, z.polygon));
+      });
+
+      if (predictedZone) {
+        this.upsertAlert(
+          "predictive_zone_entry",
+          "warning",
+          [ship.id],
+          `${ship.name} projected to enter ${predictedZone.name} within ~${Math.round(PREDICTIVE_HORIZON_SECONDS / 60)} min at current heading.`,
+          `pred-zone:${ship.id}`,
+        );
+      } else {
+        this.resolveAlert(`pred-zone:${ship.id}`);
+      }
+
+      // Predictive fuel shortfall — will run dry before reaching destination
+      const destination = this.seed.ports.find((p) => p.id === ship.destinationPortId);
+      if (destination) {
+        const fuelRatio = ship.fuelTons / Math.max(1, ship.currentRoute.estimatedFuelTons);
+        if (fuelRatio < PREDICTIVE_FUEL_RATIO && ship.status !== "insufficient_fuel") {
+          this.upsertAlert(
+            "predictive_fuel_shortfall",
+            "warning",
+            [ship.id],
+            `${ship.name} fuel critically low — only ${Math.round(fuelRatio * 100)}% of route fuel remaining. Shortfall imminent.`,
+            `pred-fuel:${ship.id}`,
+          );
+        } else {
+          this.resolveAlert(`pred-fuel:${ship.id}`);
+        }
+      }
+    }
   }
 
   private resolveAlert(sourceEventId: string): void {

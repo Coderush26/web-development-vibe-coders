@@ -5,6 +5,17 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  /* Tactical surface tokens — light mode */
+  --tac-bg:        #eef2f7;
+  --tac-panel:     #f5f8fc;
+  --tac-surface:   #ffffff;
+  --tac-overlay:   rgba(255,255,255,0.82);
+  --tac-border:    rgba(0,0,0,0.09);
+  --tac-text-hi:   #0f1e2e;
+  --tac-text-md:   #374151;
+  --tac-text-lo:   #64748b;
+  --tac-text-dim:  #94a3b8;
+
   --accent: oklch(0.97 0 0);
   --panel: #081419;
   --border: oklch(0.922 0 0);
@@ -41,6 +52,17 @@
 }
 
 @theme inline {
+  /* Tactical surface palette — switches via :root / .dark */
+  --color-tac-bg:        var(--tac-bg);
+  --color-tac-panel:     var(--tac-panel);
+  --color-tac-surface:   var(--tac-surface);
+  --color-tac-overlay:   var(--tac-overlay);
+  --color-tac-border:    var(--tac-border);
+  --color-tac-text-hi:   var(--tac-text-hi);
+  --color-tac-text-md:   var(--tac-text-md);
+  --color-tac-text-lo:   var(--tac-text-lo);
+  --color-tac-text-dim:  var(--tac-text-dim);
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-sans);
@@ -104,10 +126,69 @@ button:disabled {
   opacity: 0.55;
 }
 
+/* ── Keyframes ─────────────────────────────────────────── */
+
 @keyframes live-ring {
   0%   { opacity: 0.8; transform: scale(0.85); }
   100% { opacity: 0;   transform: scale(2.2); }
 }
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-in-left {
+  from { opacity: 0; transform: translateX(-10px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(10px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes critical-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+  50%       { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+
+@keyframes warning-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.45); }
+  50%       { box-shadow: 0 0 0 5px rgba(251, 191, 36, 0); }
+}
+
+@keyframes dot-distress {
+  0%, 100% { transform: scale(1);   opacity: 1; }
+  50%       { transform: scale(1.5); opacity: 0.65; }
+}
+
+@keyframes scan-h {
+  0%   { transform: translateY(-2px); opacity: 0; }
+  4%   { opacity: 1; }
+  92%  { opacity: 0.6; }
+  100% { transform: translateY(622px); opacity: 0; }
+}
+
+@keyframes accent-shine {
+  0%   { background-position: -300% center; }
+  100% { background-position: 300% center; }
+}
+
+@keyframes icon-rotate-in {
+  from { transform: rotate(-45deg) scale(0.7); opacity: 0; }
+  to   { transform: rotate(0deg)   scale(1);   opacity: 1; }
+}
+
+/* ── Animation utilities ────────────────────────────────── */
+
+.animate-fade-up      { animation: fade-up        0.35s ease-out both; }
+.animate-slide-left   { animation: slide-in-left  0.3s  ease-out both; }
+.animate-slide-right  { animation: slide-in-right 0.3s  ease-out both; }
+.animate-critical     { animation: critical-pulse 1.5s  ease-in-out infinite; }
+.animate-warning      { animation: warning-pulse  2.2s  ease-in-out infinite; }
+.animate-dot-distress { animation: dot-distress   1s    ease-in-out infinite; }
+.animate-icon-in      { animation: icon-rotate-in 0.25s ease-out both; }
 
 .live-ring {
   position: absolute;
@@ -115,6 +196,11 @@ button:disabled {
   border-radius: 9999px;
   background: #10b981;
   animation: live-ring 1.6s ease-out infinite;
+}
+
+/* Scan line — applied as SVG element class */
+.map-scan-line {
+  animation: scan-h 5s linear infinite;
 }
 
 .fuel-bar-track {
@@ -139,6 +225,17 @@ button:disabled {
 .thin-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
 
 .dark {
+  /* Tactical surface tokens — dark mode */
+  --tac-bg:        #050d12;
+  --tac-panel:     #081419;
+  --tac-surface:   #0d1f2a;
+  --tac-overlay:   rgba(5,13,18,0.85);
+  --tac-border:    rgba(255,255,255,0.08);
+  --tac-text-hi:   #e2e8f0;
+  --tac-text-md:   #94a3b8;
+  --tac-text-lo:   #475569;
+  --tac-text-dim:  #334155;
+
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -183,6 +280,38 @@ button:disabled {
   html {
     @apply font-sans;
   }
+}
+
+/* Light-mode overrides — recolour white-alpha borders/surfaces to dark-alpha equivalents */
+html:not(.dark) [class*="border-white/"] {
+  border-color: rgb(0 0 0 / 0.09);
+}
+html:not(.dark) [class*="bg-white/2"],
+html:not(.dark) [class*="bg-white/3"],
+html:not(.dark) [class*="bg-white/4"],
+html:not(.dark) [class*="bg-white/5"] {
+  background-color: rgb(0 0 0 / 0.04);
+}
+html:not(.dark) [class*="bg-black/"] {
+  background-color: rgb(0 0 0 / 0.05);
+}
+/* Animated accent bar */
+.accent-bar {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    transparent 30%,
+    oklch(0.789 0.154 211.5 / 0.9) 50%,
+    transparent 70%,
+    transparent 100%
+  );
+  background-size: 300% 100%;
+  animation: accent-shine 3.5s linear infinite;
+}
+
+/* Smooth theme transitions */
+html {
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 /* Override shadcn's @supports cascade — html.dark has higher specificity than .dark */

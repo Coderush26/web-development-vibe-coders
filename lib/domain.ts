@@ -17,11 +17,42 @@ export type AlertType =
   | "stranded"
   | "insufficient_fuel"
   | "out_of_fuel"
-  | "arrival";
+  | "arrival"
+  | "predictive_zone_entry"
+  | "predictive_fuel_shortfall";
 
 export type AlertSeverity = "info" | "warning" | "critical";
 
 export type DirectiveType = "HOLD_POSITION" | "RESUME_COURSE" | "CHANGE_SPEED" | "REROUTE_PORT";
+
+export type AssistanceType = "fuel_transfer" | "medical_aid" | "escort" | "cargo_offload";
+
+export type ShipAssistance = {
+  id: string;
+  assistingShipId: string;
+  targetShipId: string;
+  assistanceType: AssistanceType;
+  status: "en_route" | "in_progress" | "completed" | "cancelled";
+  createdAt: number;
+  completedAt?: number;
+  progressNote?: string;
+};
+
+export type RouteOption = RoutePlan & {
+  label: "fastest" | "balanced" | "fuel_efficient";
+  tradeoffSummary: string;
+};
+
+export type AdvisorRecommendation = {
+  id: string;
+  shipId: string;
+  shipName: string;
+  action: DirectiveType | "request_assistance";
+  payload: Record<string, string | number | boolean>;
+  reason: string;
+  confidence: number;
+  priority: "high" | "medium" | "low";
+};
 
 export type DirectiveStatus = "pending" | "accepted" | "distress_escalated";
 
@@ -186,6 +217,7 @@ export type SimulatorSnapshot = {
   directives: Directive[];
   weatherSamples: WeatherSample[];
   history: HistorySnapshot[];
+  assistanceMissions: ShipAssistance[];
   metrics: {
     connectedViewers: number;
     tickHz: number;
@@ -236,4 +268,23 @@ export type SimulatorCommand =
   | {
       type: "update_weather";
       samples: WeatherSample[];
+    }
+  | {
+      type: "select_route";
+      shipId: string;
+      waypoints: LatLng[];
+      distanceKm: number;
+      estimatedFuelTons: number;
+      weatherExposure: "clear" | "adverse";
+      routeLabel: string;
+    }
+  | {
+      type: "request_assistance";
+      assistingShipId: string;
+      targetShipId: string;
+      assistanceType: AssistanceType;
+    }
+  | {
+      type: "cancel_assistance";
+      assistanceId: string;
     };

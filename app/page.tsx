@@ -3,10 +3,21 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { interpolateLatLng } from "@/lib/geo";
 import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/theme-toggle";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { ChevronDownIcon } from "lucide-react";
 import type {
-  AlertSeverity,
+  AdvisorRecommendation,
+  AssistanceType,
   DirectiveType,
   LatLng,
+  RouteOption,
   ShipState,
   SimulatorSnapshot,
   SimulatorStreamEvent,
@@ -51,17 +62,13 @@ const directiveLabels: Record<DirectiveType, string> = {
   REROUTE_PORT: "Reroute",
 };
 
-function severityClass(severity: AlertSeverity): string {
-  if (severity === "critical") {
-    return "border-red-500/70 bg-red-950/45 text-red-100";
-  }
+const judgeFlowSteps = [
+  "Select a ship, issue Hold, switch to CPT, then Accept.",
+  "Switch back to CMD, Box Ship to trigger breach + reroute.",
+  "Escalate a directive with injuries or engine loss text.",
+  "Use Playback Review after 30s to scrub recorded events.",
+];
 
-  if (severity === "warning") {
-    return "border-amber-400/70 bg-amber-950/35 text-amber-100";
-  }
-
-  return "border-cyan-400/50 bg-cyan-950/30 text-cyan-100";
-}
 
 function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat("en", {
@@ -155,6 +162,15 @@ export default function Page() {
   const [mapPan, setMapPan] = useState<[number, number]>([0, 0]);
   const seenCriticalAlertIdsRef = useRef<Set<string>>(new Set());
   const audioContextRef = useRef<AudioContext | null>(null);
+
+  // Bonus feature state
+  const [routeOptions, setRouteOptions] = useState<RouteOption[]>([]);
+  const [routeOptionsLoading, setRouteOptionsLoading] = useState(false);
+  const [assistingShipId, setAssistingShipId] = useState("");
+  const [assistanceType, setAssistanceType] = useState<AssistanceType>("fuel_transfer");
+  const [advisorRecs, setAdvisorRecs] = useState<AdvisorRecommendation[]>([]);
+  const [advisorSource, setAdvisorSource] = useState<"grok" | "local_rules" | "">("");
+  const [advisorLoading, setAdvisorLoading] = useState(false);
 
   function playCriticalAlertCue() {
     const windowWithWebkitAudio = window as Window & {
@@ -496,6 +512,80 @@ export default function Page() {
     await postJson("/api/sim/zones", { zoneId, active }, "PATCH");
   }
 
+  async function fetchRouteOptions(shipId: string) {
+    setRouteOptionsLoading(true);
+    try {
+      const res = await fetch(`/api/sim/routes?shipId=${encodeURIComponent(shipId)}`);
+      if (res.ok) {
+        const data = (await res.json()) as { options: RouteOption[] };
+        setRouteOptions(data.options);
+      }
+    } finally {
+      setRouteOptionsLoading(false);
+    }
+  }
+
+  async function applyRouteOption(option: RouteOption) {
+    await postJson("/api/sim/routes", {
+      shipId: selectedShipId,
+      waypoints: option.waypoints,
+      distanceKm: option.distanceKm,
+      estimatedFuelTons: option.estimatedFuelTons,
+      weatherExposure: option.weatherExposure,
+      routeLabel: option.label,
+    });
+    setRouteOptions([]);
+  }
+
+  async function requestAssistance() {
+    if (!assistingShipId || !selectedShipId || assistingShipId === selectedShipId) return;
+    await postJson("/api/sim/assistance", {
+      assistingShipId,
+      targetShipId: selectedShipId,
+      assistanceType,
+    });
+  }
+
+  async function cancelAssistanceMission(assistanceId: string) {
+    await fetch("/api/sim/assistance", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ assistanceId }),
+    });
+  }
+
+  async function runAdvisor() {
+    setAdvisorLoading(true);
+    setAdvisorRecs([]);
+    try {
+      const res = await fetch("/api/sim/advisor", { method: "POST" });
+      if (res.ok) {
+        const data = (await res.json()) as { recommendations: AdvisorRecommendation[]; source: string };
+        setAdvisorRecs(data.recommendations);
+        setAdvisorSource(data.source as "grok" | "local_rules");
+      }
+    } finally {
+      setAdvisorLoading(false);
+    }
+  }
+
+  async function acceptAdvisorRec(rec: AdvisorRecommendation) {
+    if (rec.action === "request_assistance") {
+      await postJson("/api/sim/assistance", {
+        assistingShipId: rec.payload.assistingShipId,
+        targetShipId: rec.shipId,
+        assistanceType: rec.payload.assistanceType,
+      });
+    } else {
+      await postJson("/api/sim/directives", {
+        targetShipId: rec.shipId,
+        directiveType: rec.action,
+        payload: rec.payload,
+      });
+    }
+    setAdvisorRecs((prev) => prev.filter((r) => r.id !== rec.id));
+  }
+
   function unproject(x: number, y: number): LatLng {
     const bb = snapshot!.boundingBox;
     const northY = mercatorY(bb.north);
@@ -612,7 +702,7 @@ export default function Page() {
 
   if (!snapshot) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-[#050d12] text-slate-100">
+      <main className="flex min-h-screen items-center justify-center bg-tac-bg text-tac-text-hi">
         <div className="flex flex-col items-center gap-4">
           <div className="relative flex h-4 w-4">
             <span className="live-ring" />
@@ -630,11 +720,11 @@ export default function Page() {
     snapshot.ports.find((p) => p.id === id)?.name ?? id;
 
   return (
-    <main className="min-h-screen bg-[#050d12] text-slate-100">
-      {/* Top accent bar */}
-      <div className="h-[2px] w-full bg-linear-to-r from-transparent via-cyan-400 to-transparent opacity-70" />
+    <main className="min-h-screen bg-tac-bg text-tac-text-hi">
+      {/* Top accent bar — animated shimmer */}
+      <div className="accent-bar h-[2px] w-full" />
 
-      <header className="border-b border-white/8 bg-[#07151a] px-4 py-2.5">
+      <header className="animate-fade-up border-b border-white/8 bg-tac-panel px-4 py-2.5">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <div className="relative flex h-2.5 w-2.5 shrink-0">
@@ -642,7 +732,7 @@ export default function Page() {
               <span className="relative z-10 inline-flex h-2.5 w-2.5 rounded-full bg-emerald-400" />
             </div>
             <div className="min-w-0">
-              <h1 className="truncate text-sm font-bold tracking-widest text-white uppercase sm:text-base lg:text-lg">
+              <h1 className="truncate text-sm font-bold tracking-widest text-tac-text-hi uppercase sm:text-base lg:text-lg">
                 Fleet Crisis Command
               </h1>
               <p className="hidden text-[10px] tracking-wider text-slate-500 uppercase sm:block">
@@ -673,9 +763,10 @@ export default function Page() {
             <span className="hidden rounded-sm border border-white/8 bg-white/4 px-2 py-1 text-[10px] text-slate-400 sm:inline">
               <span className="text-cyan-300">{streamLagMs}ms</span>
             </span>
+            <ThemeToggle className="flex h-6 w-6 items-center justify-center rounded text-slate-400 transition-colors hover:bg-white/8 hover:text-tac-text-hi" />
             <div className="flex overflow-hidden rounded-sm border border-white/10">
               <button
-                className={`px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider transition-colors sm:px-3 sm:text-xs ${role === "command" ? "bg-cyan-400 text-slate-950" : "text-slate-400 hover:text-slate-200"}`}
+                className={`px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider transition-colors sm:px-3 sm:text-xs ${role === "command" ? "bg-cyan-400 text-slate-950" : "text-slate-400 hover:text-tac-text-hi"}`}
                 onClick={() => setRole("command")}
                 type="button"
               >
@@ -683,7 +774,7 @@ export default function Page() {
               </button>
               <div className="w-px bg-white/10" />
               <button
-                className={`px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider transition-colors sm:px-3 sm:text-xs ${role === "captain" ? "bg-cyan-400 text-slate-950" : "text-slate-400 hover:text-slate-200"}`}
+                className={`px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider transition-colors sm:px-3 sm:text-xs ${role === "captain" ? "bg-cyan-400 text-slate-950" : "text-slate-400 hover:text-tac-text-hi"}`}
                 onClick={() => {
                   setCaptainShipId(selectedShipId);
                   setRole("captain");
@@ -699,7 +790,7 @@ export default function Page() {
 
       <div className="grid grid-cols-1 lg:h-[calc(100vh-49px)] lg:overflow-hidden lg:grid-cols-[280px_1fr_320px] xl:grid-cols-[300px_1fr_340px]">
         {/* ── Fleet list ── */}
-        <aside className="flex flex-col overflow-hidden border-b border-white/6 bg-[#07151a] lg:border-b-0 lg:border-r">
+        <aside className="animate-slide-left flex flex-col overflow-hidden border-b border-white/6 bg-tac-panel lg:border-b-0 lg:border-r">
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/6">
             <span className="text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
               Fleet
@@ -709,7 +800,7 @@ export default function Page() {
             </span>
           </div>
           <div className="thin-scroll max-h-48 overflow-y-auto lg:max-h-none lg:flex-1">
-            {listedShips.map((ship) => {
+            {listedShips.map((ship, idx) => {
               const sc = statusColor(ship.status);
               const dotColor =
                 sc === "emerald"
@@ -718,12 +809,14 @@ export default function Page() {
                     ? "bg-amber-400"
                     : "bg-red-400";
               const selected = selectedShipId === ship.id;
+              const isDistressed = ship.status === "distressed";
               return (
                 <button
-                  className={`w-full px-4 py-2.5 text-left transition-colors duration-100 border-b border-white/4 ${
+                  className={`animate-fade-up w-full px-4 py-2.5 text-left transition-colors duration-100 border-b border-white/4 ${
                     selected ? "bg-cyan-400/10" : "hover:bg-white/4"
                   }`}
                   key={ship.id}
+                  style={{ animationDelay: `${idx * 30}ms` }}
                   onClick={() => {
                     if (role === "command") {
                       setSelectedShipId(ship.id);
@@ -735,10 +828,10 @@ export default function Page() {
                   <div className="flex items-center justify-between">
                     <span className="flex items-center gap-2">
                       <span
-                        className={`h-1.5 w-1.5 rounded-full shrink-0 ${dotColor}`}
+                        className={`h-1.5 w-1.5 rounded-full shrink-0 ${dotColor} ${isDistressed ? "animate-dot-distress" : ""}`}
                       />
                       <span
-                        className={`text-sm font-medium ${selected ? "text-cyan-300" : "text-slate-200"}`}
+                        className={`text-sm font-medium ${selected ? "text-cyan-300" : "text-tac-text-hi"}`}
                       >
                         {ship.name}
                       </span>
@@ -756,7 +849,7 @@ export default function Page() {
         </aside>
 
         {/* ── Map ── */}
-        <section className="bg-[#061018] flex flex-col">
+        <section className="relative bg-tac-panel flex flex-col">
           <svg
             className="w-full"
             style={{
@@ -988,6 +1081,7 @@ export default function Page() {
 
               return (
                 <g
+                  aria-label={`${ship.name} — ${ship.status}, fuel ${Math.round(ship.fuelTons)}t`}
                   className="cursor-pointer"
                   key={ship.id}
                   onClick={() => {
@@ -996,6 +1090,8 @@ export default function Page() {
                       setCaptainShipId(ship.id);
                     }
                   }}
+                  role="button"
+                  tabIndex={role === "command" ? 0 : undefined}
                 >
                   {sel && (
                     <circle
@@ -1042,6 +1138,17 @@ export default function Page() {
               );
             })}
 
+            {/* Radar scan line */}
+            <rect
+              className="map-scan-line pointer-events-none"
+              x={mapOriginX}
+              y={mapOriginY}
+              width={MAP_WIDTH}
+              height={2}
+              fill="rgb(34 211 238)"
+              opacity={0.12}
+            />
+
             {/* North arrow - anchored to top-left of the tight viewBox */}
             <g transform={`translate(${mapOriginX + 28},${mapOriginY + 28})`}>
               <circle
@@ -1080,73 +1187,150 @@ export default function Page() {
 
           </svg>
 
+          {/* Floating map controls */}
+          <div className="pointer-events-none absolute bottom-9 right-2 z-10 flex flex-col items-end gap-1.5 sm:bottom-12 sm:right-3 sm:gap-2">
+            {/* Zoom */}
+            <div className="pointer-events-auto flex flex-col overflow-hidden rounded border border-white/12 bg-tac-overlay shadow-xl backdrop-blur-md sm:rounded-lg">
+              <button
+                className="flex h-6 w-6 items-center justify-center text-slate-400 transition-colors hover:bg-cyan-400/15 hover:text-cyan-300 sm:h-7 sm:w-7"
+                onClick={() => zoomMap(1.25)}
+                title="Zoom in"
+                type="button"
+              >
+                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
+                </svg>
+              </button>
+              <div className="h-px bg-white/8" />
+              <button
+                className="flex h-6 w-6 items-center justify-center text-slate-400 transition-colors hover:bg-cyan-400/15 hover:text-cyan-300 sm:h-7 sm:w-7"
+                onClick={() => zoomMap(1 / 1.25)}
+                title="Zoom out"
+                type="button"
+              >
+                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 12h16" />
+                </svg>
+              </button>
+            </div>
+
+            {/* D-pad */}
+            <div className="pointer-events-auto rounded border border-white/12 bg-tac-overlay p-1 shadow-xl backdrop-blur-md sm:rounded-lg sm:p-1.5">
+              <div className="grid grid-cols-3 gap-px sm:gap-0.5">
+                <div />
+                <button
+                  className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition-colors hover:bg-cyan-400/15 hover:text-cyan-300 sm:h-6 sm:w-6"
+                  onClick={() => panMap(0, -45)}
+                  title="Pan north"
+                  type="button"
+                >
+                  <svg className="h-2.5 w-2.5 sm:h-3 sm:w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 15l7-7 7 7" />
+                  </svg>
+                </button>
+                <div />
+                <button
+                  className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition-colors hover:bg-cyan-400/15 hover:text-cyan-300 sm:h-6 sm:w-6"
+                  onClick={() => panMap(-45, 0)}
+                  title="Pan west"
+                  type="button"
+                >
+                  <svg className="h-2.5 w-2.5 sm:h-3 sm:w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+                <button
+                  className="flex h-5 w-5 items-center justify-center rounded text-slate-500 transition-colors hover:bg-white/8 hover:text-cyan-300 sm:h-6 sm:w-6"
+                  onClick={resetMapView}
+                  title="Reset view"
+                  type="button"
+                >
+                  <svg className="h-2.5 w-2.5 sm:h-3 sm:w-3" fill="currentColor" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="3.5" />
+                    <circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                  </svg>
+                </button>
+                <button
+                  className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition-colors hover:bg-cyan-400/15 hover:text-cyan-300 sm:h-6 sm:w-6"
+                  onClick={() => panMap(45, 0)}
+                  title="Pan east"
+                  type="button"
+                >
+                  <svg className="h-2.5 w-2.5 sm:h-3 sm:w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+                <div />
+                <button
+                  className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition-colors hover:bg-cyan-400/15 hover:text-cyan-300 sm:h-6 sm:w-6"
+                  onClick={() => panMap(0, 45)}
+                  title="Pan south"
+                  type="button"
+                >
+                  <svg className="h-2.5 w-2.5 sm:h-3 sm:w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                <div />
+              </div>
+            </div>
+          </div>
+
           {/* Map status bar */}
-          <div className="flex shrink-0 flex-wrap items-center gap-0 border-t border-white/6 bg-black/40 text-[10px] text-slate-500 uppercase tracking-wider backdrop-blur-sm">
-            <span className="border-r border-white/6 px-3 py-2 text-emerald-400">
-              ● SSE 1Hz
+          <div className="flex shrink-0 flex-wrap items-center gap-0 border-t border-white/6 bg-tac-overlay/80 text-[10px] text-slate-500 uppercase tracking-wider backdrop-blur-sm">
+            <span className="flex items-center gap-1.5 border-r border-white/6 px-3 py-2">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_4px_#4ade80]" />
+              <span className="text-emerald-400">SSE 1Hz</span>
             </span>
-            <span className="border-r border-white/6 px-3 py-2">
-              Interp active
-            </span>
-            <span className="border-r border-white/6 px-3 py-2">
+            <span className="border-r border-white/6 px-3 py-2 text-slate-600">
               {renderedShips.length} routes
             </span>
-            <span className="border-r border-white/6 px-3 py-2">
+            <span className="border-r border-white/6 px-3 py-2 text-slate-600">
               {snapshot.weatherSamples.length} wx
             </span>
-            <span className="border-r border-white/6 px-3 py-2">
+            <span className="border-r border-white/6 px-3 py-2 text-slate-600">
               {snapshot.restrictedZones.length} zones
             </span>
             <span
               className={
-                activeAlerts.length > 0 ? "px-3 py-2 text-red-400" : "px-3 py-2"
+                activeAlerts.length > 0
+                  ? "flex items-center gap-1 px-3 py-2 text-red-400"
+                  : "px-3 py-2 text-slate-600"
               }
             >
+              {activeAlerts.length > 0 && <span className="h-1.5 w-1.5 rounded-full bg-red-400 shadow-[0_0_4px_#f87171]" />}
               {activeAlerts.length} alerts
             </span>
-            <div className="ml-auto flex items-center border-l border-white/6">
-              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => panMap(-45, 0)} type="button">
-                W
-              </button>
-              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => panMap(0, -45)} type="button">
-                N
-              </button>
-              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => panMap(0, 45)} type="button">
-                S
-              </button>
-              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => panMap(45, 0)} type="button">
-                E
-              </button>
-              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => zoomMap(1.2)} type="button">
-                +
-              </button>
-              <button className="border-r border-white/6 px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={() => zoomMap(1 / 1.2)} type="button">
-                -
-              </button>
-              <button className="px-2 py-2 text-slate-400 hover:text-cyan-300" onClick={resetMapView} type="button">
-                Reset
-              </button>
-            </div>
+            {inPlayback && (
+              <span className="flex items-center gap-1 border-l border-white/6 px-3 py-2 text-amber-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-300" />
+                Playback
+              </span>
+            )}
           </div>
         </section>
 
         {/* ── Right panel ── */}
-        <aside className="thin-scroll flex flex-col overflow-y-auto border-t border-white/6 bg-[#07151a] lg:border-t-0 lg:border-l">
+        <aside className="animate-slide-right thin-scroll flex flex-col overflow-y-auto border-t border-white/6 bg-tac-panel lg:border-t-0 lg:border-l">
           {role === "command" ? (
             <>
               {/* Playback controls */}
               <div className="border-b border-white/6 p-4">
                 <div className="mb-3 flex items-center justify-between gap-2">
-                  <p className="text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
-                    Playback
-                  </p>
+                  <div className="flex items-center gap-2">
+                    <span className="h-3 w-0.5 rounded-full bg-cyan-400/60" />
+                    <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                      Playback
+                    </p>
+                  </div>
                   <span
-                    className={`rounded border px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest ${
+                    className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-widest ${
                       inPlayback
-                        ? "border-amber-400/40 bg-amber-400/10 text-amber-300"
-                        : "border-emerald-400/30 bg-emerald-400/10 text-emerald-300"
+                        ? "border-amber-400/30 bg-amber-400/8 text-amber-300"
+                        : "border-emerald-400/25 bg-emerald-400/8 text-emerald-300"
                     }`}
                   >
+                    <span className={`h-1.5 w-1.5 rounded-full ${inPlayback ? "bg-amber-400" : "bg-emerald-400 shadow-[0_0_4px_#4ade80]"}`} />
                     {inPlayback ? "Review" : "Live"}
                   </span>
                 </div>
@@ -1175,7 +1359,7 @@ export default function Page() {
                   </Button>
                 </div>
 
-                <div className="mt-3 rounded border border-white/8 bg-black/20 p-3">
+                <div className="mt-3 rounded-lg border border-white/8 bg-black/25 p-3">
                   <input
                     className="w-full accent-cyan-400"
                     disabled={snapshot.history.length === 0}
@@ -1187,18 +1371,23 @@ export default function Page() {
                     type="range"
                     value={playbackCursor}
                   />
-                  <div className="mt-1 flex justify-between text-[9px] uppercase tracking-wider text-slate-600">
-                    <span>
-                      {newestHistoryFrame
-                        ? `Newest ${formatTime(newestHistoryFrame.timestamp)}`
-                        : "No frames"}
+                  <div className="mt-1.5 flex justify-between text-[9px] text-slate-600">
+                    <span className="font-mono">
+                      {newestHistoryFrame ? formatTime(newestHistoryFrame.timestamp) : "No frames"}
                     </span>
-                    <span>
-                      {oldestHistoryFrame
-                        ? `Oldest ${formatTime(oldestHistoryFrame.timestamp)}`
-                        : ""}
+                    <span className="font-mono">
+                      {oldestHistoryFrame ? formatTime(oldestHistoryFrame.timestamp) : ""}
                     </span>
                   </div>
+                  {inPlayback && snapshot.history.length > 0 && (
+                    <p className="mt-1 text-center text-[9px] tracking-wider text-amber-400/60">
+                      {playbackCursor === 0
+                        ? "◀ newest frame"
+                        : playbackCursor === snapshot.history.length - 1
+                          ? "oldest frame ▶"
+                          : null}
+                    </p>
+                  )}
                 </div>
 
                 <div className="mt-2 grid grid-cols-2 gap-2">
@@ -1235,13 +1424,13 @@ export default function Page() {
                 </div>
 
                 {playbackFrame ? (
-                  <div className="mt-3 space-y-3 rounded border border-amber-400/20 bg-amber-950/10 p-3">
+                  <div className="mt-3 space-y-3 rounded-lg border border-amber-400/15 bg-amber-950/8 p-3">
                     <div className="grid grid-cols-2 gap-2 text-[10px]">
                       <div>
                         <p className="uppercase tracking-wider text-slate-600">
                           Frame
                         </p>
-                        <p className="font-mono text-slate-300">
+                        <p className="font-mono text-tac-text-md">
                           {playbackCursor + 1}/{snapshot.history.length} · tick{" "}
                           {playbackFrame.tick}
                         </p>
@@ -1250,7 +1439,7 @@ export default function Page() {
                         <p className="uppercase tracking-wider text-slate-600">
                           Alerts / Zones
                         </p>
-                        <p className="font-mono text-slate-300">
+                        <p className="font-mono text-tac-text-md">
                           {playbackFrame.activeAlertCount} /{" "}
                           {playbackFrame.restrictedZoneCount}
                         </p>
@@ -1264,7 +1453,7 @@ export default function Page() {
                         {Object.entries(playbackFrame.statusCounts ?? {}).map(
                           ([status, count]) => (
                             <span
-                              className="rounded border border-white/8 bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-300"
+                              className="rounded border border-white/8 bg-white/5 px-1.5 py-0.5 text-[10px] text-tac-text-md"
                               key={status}
                             >
                               {formatStatus(status as ShipState["status"])}{" "}
@@ -1287,7 +1476,7 @@ export default function Page() {
                         <div className="thin-scroll max-h-24 space-y-1 overflow-y-auto pr-1">
                           {playbackFrame.keyEvents.map((event, index) => (
                             <p
-                              className="border-l border-cyan-400/30 pl-2 text-[10px] leading-snug text-slate-300"
+                              className="border-l border-cyan-400/30 pl-2 text-[10px] leading-snug text-tac-text-md"
                               key={`${playbackFrame.timestamp}-${index}`}
                             >
                               {event}
@@ -1305,93 +1494,184 @@ export default function Page() {
                 )}
               </div>
 
+              {/* Judge runbook */}
+              <div className="border-b border-white/6 p-4">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="h-3 w-0.5 rounded-full bg-cyan-400/60" />
+                    <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                      Judge Runbook
+                    </p>
+                  </div>
+                  <span className="rounded-full border border-cyan-400/25 bg-cyan-400/8 px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-widest text-cyan-400">
+                    4 min
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {judgeFlowSteps.map((step, index) => (
+                    <div
+                      className="flex gap-2.5 rounded-md border border-white/6 bg-white/3 p-2.5 text-[10px] leading-snug text-tac-text-md"
+                      key={step}
+                    >
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-cyan-400/20 font-mono text-[9px] font-bold text-cyan-300">
+                        {index + 1}
+                      </span>
+                      <span className="text-slate-400">{step}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               {/* Selected Ship */}
               <div className="border-b border-white/6 p-4">
-                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
-                  Selected Ship
-                </p>
+                <div className="mb-3 flex items-center gap-2">
+                  <span className="h-3 w-0.5 rounded-full bg-cyan-400/60" />
+                  <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                    Selected Ship
+                  </p>
+                </div>
                 {selectedShip && (
                   <>
-                    <div className="flex items-start justify-between gap-2 mb-3">
-                      <div>
-                        <p className="text-base font-bold text-white leading-tight">
-                          {selectedShip.name}
-                        </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          {selectedShip.id} · {selectedShip.cargo}
-                        </p>
-                      </div>
-                      <span
-                        className={`mt-0.5 shrink-0 rounded px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest ${
-                          statusColor(selectedShip.status) === "emerald"
-                            ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30"
-                            : statusColor(selectedShip.status) === "amber"
-                              ? "bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30"
-                              : "bg-red-500/15 text-red-300 ring-1 ring-red-500/30"
-                        }`}
-                      >
-                        {formatStatus(selectedShip.status)}
-                      </span>
-                    </div>
-                    <div className="mb-3">
-                      <div className="mb-1 flex justify-between text-[10px]">
-                        <span className="text-slate-600 uppercase tracking-wider">
-                          Fuel
-                        </span>
-                        <span className="font-mono text-slate-400">
-                          {selectedShip.fuelTons.toFixed(0)} t
-                        </span>
-                      </div>
-                      <FuelBar fuel={selectedShip.fuelTons} />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      {[
-                        ["Speed", `${selectedShip.speedKnots.toFixed(1)} kt`],
-                        [
-                          "Heading",
-                          `${selectedShip.headingDegrees.toFixed(0)}° ${toCardinal(selectedShip.headingDegrees)}`,
-                        ],
-                        ["Dest", destName(selectedShip.destinationPortId)],
-                      ].map(([label, val]) => (
-                        <div
-                          key={label}
-                          className={label === "Dest" ? "col-span-2" : ""}
-                        >
-                          <p className="text-[9px] uppercase tracking-wider text-slate-600">
-                            {label}
+                    <div className="rounded-lg border border-white/6 bg-white/2 p-3">
+                      <div className="flex items-start justify-between gap-2 mb-3">
+                        <div>
+                          <p className="text-sm font-bold text-white leading-tight">
+                            {selectedShip.name}
                           </p>
-                          <p className="mt-0.5 font-mono text-sm text-slate-200">
-                            {val}
+                          <p className="text-[10px] text-slate-500 mt-0.5 font-mono">
+                            {selectedShip.id}
+                          </p>
+                          <p className="text-[10px] text-slate-600 mt-0.5 truncate max-w-[140px]">
+                            {selectedShip.cargo}
                           </p>
                         </div>
-                      ))}
+                        <span
+                          className={`mt-0.5 shrink-0 rounded-full px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-widest ${
+                            statusColor(selectedShip.status) === "emerald"
+                              ? "bg-emerald-500/12 text-emerald-300 ring-1 ring-emerald-500/25"
+                              : statusColor(selectedShip.status) === "amber"
+                                ? "bg-amber-500/12 text-amber-300 ring-1 ring-amber-500/25"
+                                : "bg-red-500/12 text-red-300 ring-1 ring-red-500/25"
+                          }`}
+                        >
+                          {formatStatus(selectedShip.status)}
+                        </span>
+                      </div>
+                      <div className="mb-3">
+                        <div className="mb-1.5 flex justify-between text-[9px]">
+                          <span className="text-slate-600 uppercase tracking-wider">Fuel</span>
+                          <span className="font-mono text-slate-400">{selectedShip.fuelTons.toFixed(0)} t</span>
+                        </div>
+                        <FuelBar fuel={selectedShip.fuelTons} />
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-2.5">
+                        {[
+                          ["Speed", `${selectedShip.speedKnots.toFixed(1)} kt`],
+                          ["Heading", `${selectedShip.headingDegrees.toFixed(0)}° ${toCardinal(selectedShip.headingDegrees)}`],
+                          ["Dest", destName(selectedShip.destinationPortId)],
+                        ].map(([label, val]) => (
+                          <div key={label} className={label === "Dest" ? "col-span-2" : ""}>
+                            <p className="text-[9px] uppercase tracking-wider text-slate-600">{label}</p>
+                            <p className="mt-0.5 font-mono text-xs text-tac-text-hi">{val}</p>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </>
                 )}
               </div>
 
+              {/* Route Options */}
+              <div className="border-b border-white/6 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="h-3 w-0.5 rounded-full bg-cyan-400/60" />
+                    <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                      Route Options
+                    </p>
+                  </div>
+                  <Button
+                    disabled={inPlayback || !selectedShip || routeOptionsLoading}
+                    onClick={() => selectedShip && fetchRouteOptions(selectedShip.id)}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {routeOptionsLoading ? "Computing…" : "Compute"}
+                  </Button>
+                </div>
+                {routeOptions.length === 0 ? (
+                  <p className="text-[10px] text-slate-600">Compute 3 route variants — fastest, balanced, and fuel-efficient.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {routeOptions.map((opt, idx) => {
+                      const styles: Record<string, { bar: string; badge: string; border: string }> = {
+                        fastest:       { bar: "bg-cyan-400",    badge: "text-cyan-300 bg-cyan-400/10",    border: "border-l-cyan-400/60" },
+                        balanced:      { bar: "bg-emerald-400", badge: "text-emerald-300 bg-emerald-400/10", border: "border-l-emerald-400/60" },
+                        fuel_efficient:{ bar: "bg-amber-400",   badge: "text-amber-300 bg-amber-400/10",  border: "border-l-amber-400/60" },
+                      };
+                      const s = styles[opt.label] ?? { bar: "bg-slate-400", badge: "text-tac-text-md bg-white/5", border: "border-l-white/20" };
+                      return (
+                        <div
+                          className={`animate-fade-up rounded-md border border-white/6 border-l-2 bg-white/2 p-2.5 text-[10px] ${s.border}`}
+                          key={opt.label}
+                          style={{ animationDelay: `${idx * 80}ms` }}
+                        >
+                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <span className={`rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest ${s.badge}`}>
+                              {opt.label.replace("_", " ")}
+                            </span>
+                            <Button
+                              disabled={inPlayback}
+                              onClick={() => applyRouteOption(opt)}
+                              size="sm"
+                              type="button"
+                              variant="outline"
+                            >
+                              Apply
+                            </Button>
+                          </div>
+                          <p className="leading-relaxed text-slate-400">{opt.tradeoffSummary}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               {/* Directive */}
               <div className="border-b border-white/6 p-4">
-                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
-                  Directive
-                </p>
+                <div className="mb-3 flex items-center gap-2">
+                  <span className="h-3 w-0.5 rounded-full bg-cyan-400/60" />
+                  <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">Directive</p>
+                </div>
                 <form onSubmit={issueDirective} className="flex flex-col gap-2">
-                  <select
-                    className="w-full border border-white/8 bg-[#050d12] px-3 py-2 text-sm text-slate-200 focus:border-cyan-400/40 focus:outline-none"
-                    onChange={(e) =>
-                      setDirectiveType(e.target.value as DirectiveType)
-                    }
-                    value={directiveType}
-                  >
-                    {Object.entries(directiveLabels).map(([v, l]) => (
-                      <option key={v} value={v}>
-                        {l}
-                      </option>
-                    ))}
-                  </select>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        className="w-full justify-between border border-white/8 bg-tac-bg px-3 py-2 text-sm text-tac-text-hi hover:bg-white/5 hover:text-tac-text-hi"
+                        variant="ghost"
+                        type="button"
+                      >
+                        {directiveLabels[directiveType]}
+                        <ChevronDownIcon className="size-3.5 opacity-50" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-full min-w-[var(--radix-dropdown-menu-trigger-width)] bg-tac-surface border-white/10">
+                      {Object.entries(directiveLabels).map(([v, l]) => (
+                        <DropdownMenuItem
+                          key={v}
+                          className="text-tac-text-hi focus:bg-cyan-400/10 focus:text-cyan-300"
+                          onSelect={() => setDirectiveType(v as DirectiveType)}
+                        >
+                          {l}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   {directiveType === "CHANGE_SPEED" && (
                     <input
-                      className="w-full border border-white/8 bg-[#050d12] px-3 py-2 text-sm text-slate-200 focus:border-cyan-400/40 focus:outline-none"
+                      className="w-full border border-white/8 bg-tac-bg px-3 py-2 text-sm text-tac-text-hi focus:border-cyan-400/40 focus:outline-none"
                       max={28}
                       min={0}
                       type="number"
@@ -1400,17 +1680,29 @@ export default function Page() {
                     />
                   )}
                   {directiveType === "REROUTE_PORT" && (
-                    <select
-                      className="w-full border border-white/8 bg-[#050d12] px-3 py-2 text-sm text-slate-200 focus:border-cyan-400/40 focus:outline-none"
-                      onChange={(e) => setDestinationPortId(e.target.value)}
-                      value={destinationPortId}
-                    >
-                      {snapshot.ports.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          className="w-full justify-between border border-white/8 bg-tac-bg px-3 py-2 text-sm text-tac-text-hi hover:bg-white/5 hover:text-tac-text-hi"
+                          variant="ghost"
+                          type="button"
+                        >
+                          {snapshot.ports.find((p) => p.id === destinationPortId)?.name ?? "Select port"}
+                          <ChevronDownIcon className="size-3.5 opacity-50" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent className="w-full min-w-[var(--radix-dropdown-menu-trigger-width)] bg-tac-surface border-white/10">
+                        {snapshot.ports.map((p) => (
+                          <DropdownMenuItem
+                            key={p.id}
+                            className="text-tac-text-hi focus:bg-cyan-400/10 focus:text-cyan-300"
+                            onSelect={() => setDestinationPortId(p.id)}
+                          >
+                            {p.name}
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   )}
                   <Button
                     className="w-full uppercase tracking-widest text-xs"
@@ -1496,11 +1788,127 @@ export default function Page() {
                 </form>
               </div>
 
+              {/* Ship-to-Ship Assistance */}
+              <div className="border-b border-white/6 p-4">
+                <div className="mb-2 flex items-center gap-2">
+                  <span className="h-3 w-0.5 rounded-full bg-cyan-400/60" />
+                  <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">Ship Assistance</p>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        className="w-full justify-between border border-white/8 bg-tac-bg px-2 py-1.5 text-xs text-tac-text-hi hover:bg-white/5 hover:text-tac-text-hi"
+                        variant="ghost"
+                        type="button"
+                      >
+                        {assistanceType === "fuel_transfer" ? "Fuel Transfer"
+                          : assistanceType === "medical_aid" ? "Medical Aid"
+                          : assistanceType === "escort" ? "Escort"
+                          : "Cargo Offload"}
+                        <ChevronDownIcon className="size-3 opacity-50" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-full min-w-[var(--radix-dropdown-menu-trigger-width)] bg-tac-surface border-white/10">
+                      {(["fuel_transfer", "medical_aid", "escort", "cargo_offload"] as AssistanceType[]).map((t) => (
+                        <DropdownMenuItem
+                          key={t}
+                          className="text-tac-text-hi focus:bg-cyan-400/10 focus:text-cyan-300 text-xs"
+                          onSelect={() => setAssistanceType(t)}
+                        >
+                          {t === "fuel_transfer" ? "Fuel Transfer"
+                            : t === "medical_aid" ? "Medical Aid"
+                            : t === "escort" ? "Escort"
+                            : "Cargo Offload"}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        className="w-full justify-between border border-white/8 bg-tac-bg px-2 py-1.5 text-xs text-tac-text-hi hover:bg-white/5 hover:text-tac-text-hi"
+                        variant="ghost"
+                        type="button"
+                      >
+                        {assistingShipId
+                          ? (snapshot.ships.find((s) => s.id === assistingShipId)?.name ?? "Unknown")
+                          : "— Select assisting ship —"}
+                        <ChevronDownIcon className="size-3 opacity-50" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-full min-w-[var(--radix-dropdown-menu-trigger-width)] bg-tac-surface border-white/10 max-h-48 overflow-y-auto">
+                      <DropdownMenuItem
+                        className="text-slate-500 focus:bg-white/5 focus:text-slate-400 text-xs italic"
+                        onSelect={() => setAssistingShipId("")}
+                      >
+                        — Select assisting ship —
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator className="bg-white/8" />
+                      {snapshot.ships
+                        .filter((s) => s.id !== selectedShipId)
+                        .map((s) => (
+                          <DropdownMenuItem
+                            key={s.id}
+                            className="text-tac-text-hi focus:bg-cyan-400/10 focus:text-cyan-300 text-xs"
+                            onSelect={() => setAssistingShipId(s.id)}
+                          >
+                            {s.name}
+                            <span className="ml-auto text-slate-500">{Math.round(s.fuelTons)}t</span>
+                          </DropdownMenuItem>
+                        ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <Button
+                    className="w-full text-xs uppercase tracking-widest"
+                    disabled={inPlayback || !assistingShipId || assistingShipId === selectedShipId}
+                    onClick={requestAssistance}
+                    type="button"
+                    variant="outline"
+                  >
+                    Dispatch to {selectedShip?.name ?? "Ship"}
+                  </Button>
+                </div>
+                {snapshot.assistanceMissions.filter((m) => m.status === "en_route" || m.status === "in_progress").length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {snapshot.assistanceMissions
+                      .filter((m) => m.status === "en_route" || m.status === "in_progress")
+                      .map((m) => {
+                        const assistingName = snapshot.ships.find((s) => s.id === m.assistingShipId)?.name ?? m.assistingShipId;
+                        const targetName = snapshot.ships.find((s) => s.id === m.targetShipId)?.name ?? m.targetShipId;
+                        return (
+                          <div className="flex items-center justify-between gap-2 border border-white/8 bg-black/20 p-2 text-[10px]" key={m.id}>
+                            <div>
+                              <span className={`font-bold ${m.status === "in_progress" ? "text-emerald-400" : "text-amber-300"}`}>
+                                {m.status === "in_progress" ? "● " : "→ "}
+                              </span>
+                              <span className="text-tac-text-md">{assistingName}</span>
+                              <span className="text-slate-500"> → </span>
+                              <span className="text-tac-text-md">{targetName}</span>
+                              <span className="ml-1 text-slate-500">({m.assistanceType.replace("_", " ")})</span>
+                            </div>
+                            <Button
+                              disabled={inPlayback}
+                              onClick={() => cancelAssistanceMission(m.id)}
+                              size="sm"
+                              type="button"
+                              variant="ghost"
+                            >
+                              ✕
+                            </Button>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+
               {/* Zone editing */}
               <div className="border-b border-white/6 p-4">
-                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
-                  Zone Editing
-                </p>
+                <div className="mb-3 flex items-center gap-2">
+                  <span className="h-3 w-0.5 rounded-full bg-red-400/60" />
+                  <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">Zone Editing</p>
+                </div>
                 {snapshot.restrictedZones.length === 0 ? (
                   <p className="text-xs text-slate-600">
                     No restricted zones yet.
@@ -1513,7 +1921,7 @@ export default function Page() {
                         key={zone.id}
                       >
                         <div>
-                          <p className="text-xs text-slate-200">{zone.name}</p>
+                          <p className="text-xs text-tac-text-hi">{zone.name}</p>
                           <p className="text-[10px] text-slate-600">
                             {zone.active ? "active" : "inactive"}
                           </p>
@@ -1542,26 +1950,122 @@ export default function Page() {
                 )}
               </div>
 
+              {/* AI Fleet Advisor */}
+              <div className="border-b border-white/6 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="h-3 w-0.5 rounded-full bg-violet-400/60" />
+                    <div>
+                      <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">AI Advisor</p>
+                      {advisorSource && (
+                        <p className="text-[9px] text-slate-600">
+                          {advisorSource === "grok" ? "Grok AI" : "local rules"}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <Button
+                    disabled={inPlayback || advisorLoading}
+                    onClick={runAdvisor}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {advisorLoading ? "Analyzing…" : "Analyze Fleet"}
+                  </Button>
+                </div>
+                {advisorRecs.length === 0 && !advisorLoading ? (
+                  <p className="text-[10px] text-slate-600">Analyze fleet for prioritized command recommendations.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {advisorRecs.map((rec, idx) => {
+                      const ps: Record<string, { border: string; badge: string }> = {
+                        high:   { border: "border-l-red-500/70",   badge: "bg-red-500/12 text-red-300" },
+                        medium: { border: "border-l-amber-400/60", badge: "bg-amber-400/12 text-amber-300" },
+                        low:    { border: "border-l-white/15",     badge: "bg-white/5 text-slate-400" },
+                      };
+                      const p = ps[rec.priority] ?? ps.low;
+                      return (
+                        <div
+                          className={`animate-slide-left rounded-md border border-white/6 border-l-2 bg-white/2 p-2.5 text-[10px] ${p.border}`}
+                          key={rec.id}
+                          style={{ animationDelay: `${idx * 60}ms` }}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 mb-1">
+                                <p className="truncate font-bold text-tac-text-hi text-xs">{rec.shipName}</p>
+                                <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-bold uppercase ${p.badge}`}>
+                                  {rec.priority}
+                                </span>
+                              </div>
+                              <p className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">
+                                {rec.action.replace(/_/g, " ")}
+                              </p>
+                              <p className="leading-snug text-slate-400 mb-2">{rec.reason}</p>
+                              <div className="flex items-center gap-2">
+                                <div className="h-1 flex-1 rounded-full bg-white/8">
+                                  <div
+                                    className="h-full rounded-full bg-violet-400/60"
+                                    style={{ width: `${Math.round(rec.confidence * 100)}%` }}
+                                  />
+                                </div>
+                                <span className="shrink-0 text-[9px] text-slate-600">{Math.round(rec.confidence * 100)}%</span>
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 flex-col gap-1">
+                              <Button
+                                disabled={inPlayback}
+                                onClick={() => acceptAdvisorRec(rec)}
+                                size="sm"
+                                type="button"
+                                variant="default"
+                              >
+                                Accept
+                              </Button>
+                              <Button
+                                onClick={() => setAdvisorRecs((prev) => prev.filter((r) => r.id !== rec.id))}
+                                size="sm"
+                                type="button"
+                                variant="ghost"
+                              >
+                                Dismiss
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               {/* Alerts */}
               <div className="flex flex-1 flex-col p-4">
                 <div className="mb-3 flex items-center gap-2">
-                  <p className="text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
-                    Alerts
-                  </p>
+                  <span className="h-3 w-0.5 rounded-full bg-red-400/60" />
+                  <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">Alerts</p>
                   {activeAlerts.length > 0 && (
-                    <span className="rounded bg-red-500 px-1.5 py-0.5 text-[9px] font-bold text-white">
+                    <span className="ml-auto animate-pulse rounded-full bg-red-500 px-2 py-0.5 text-[9px] font-bold text-white">
                       {activeAlerts.length}
                     </span>
                   )}
                 </div>
                 {activeAlerts.length === 0 ? (
-                  <p className="text-xs text-slate-600">No active alerts.</p>
+                  <p className="text-[10px] text-slate-600">No active alerts.</p>
                 ) : (
                   <div className="space-y-2">
-                    {activeAlerts.map((alert) => (
+                    {activeAlerts.map((alert, idx) => (
                       <div
-                        className={`border p-3 text-xs ${severityClass(alert.severity)}`}
+                        className={`animate-slide-right rounded-md border border-l-2 p-3 text-xs ${
+                          alert.severity === "critical"
+                            ? "animate-critical border-white/6 border-l-red-500/80 bg-red-950/20 text-red-100"
+                            : alert.severity === "warning"
+                              ? "animate-warning border-white/6 border-l-amber-400/70 bg-amber-950/15 text-amber-100"
+                              : "border-white/6 border-l-cyan-400/50 bg-cyan-950/15 text-cyan-100"
+                        }`}
                         key={alert.id}
+                        style={{ animationDelay: `${idx * 50}ms` }}
                       >
                         <div className="flex items-start justify-between gap-2">
                           <p className="leading-snug">{alert.message}</p>
@@ -1580,8 +2084,8 @@ export default function Page() {
                             Ack
                           </Button>
                         </div>
-                        <p className="mt-1.5 text-[10px] opacity-50">
-                          {alert.type} · {formatTime(alert.createdAt)}
+                        <p className="mt-1.5 font-mono text-[9px] opacity-40">
+                          {alert.type.replace(/_/g, " ")} · {formatTime(alert.createdAt)}
                         </p>
                       </div>
                     ))}
@@ -1593,71 +2097,73 @@ export default function Page() {
             <>
               {/* Captain Console */}
               <div className="border-b border-white/6 p-4">
-                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
-                  Captain Console
-                </p>
+                <div className="mb-3 flex items-center gap-2">
+                  <span className="h-3 w-0.5 rounded-full bg-cyan-400/60" />
+                  <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">Captain Console</p>
+                </div>
                 {captainShip && (
                   <>
-                    <p className="text-base font-bold text-white">
-                      {captainShip.name}
-                    </p>
-                    <p className="mt-0.5 text-[11px] text-slate-500">
-                      {captainShip.id}
-                    </p>
-                    <div className="mt-3 mb-1 flex justify-between text-[10px]">
-                      <span className="uppercase tracking-wider text-slate-600">
-                        Fuel
-                      </span>
-                      <span className="font-mono text-slate-400">
-                        {captainShip.fuelTons.toFixed(0)} t
-                      </span>
-                    </div>
-                    <FuelBar fuel={captainShip.fuelTons} />
-                    <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-                      {[
-                        ["Status", formatStatus(captainShip.status)],
-                        ["Speed", `${captainShip.speedKnots.toFixed(1)} kt`],
-                        [
-                          "Heading",
-                          `${captainShip.headingDegrees.toFixed(0)}° ${toCardinal(captainShip.headingDegrees)}`,
-                        ],
-                        ["Dest", destName(captainShip.destinationPortId)],
-                        ["Cargo", captainShip.cargo],
-                      ].map(([label, val]) => (
-                        <div key={label}>
-                          <p className="text-[9px] uppercase tracking-wider text-slate-600">
-                            {label}
-                          </p>
-                          <p className="mt-0.5 font-mono text-slate-200 truncate">
-                            {val}
-                          </p>
+                    <div className="rounded-lg border border-white/6 bg-white/2 p-3">
+                      <div className="flex items-start justify-between gap-2 mb-3">
+                        <div>
+                          <p className="text-sm font-bold text-white leading-tight">{captainShip.name}</p>
+                          <p className="mt-0.5 font-mono text-[10px] text-slate-500">{captainShip.id}</p>
                         </div>
-                      ))}
+                        <span
+                          className={`mt-0.5 shrink-0 rounded-full px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-widest ${
+                            statusColor(captainShip.status) === "emerald"
+                              ? "bg-emerald-500/12 text-emerald-300 ring-1 ring-emerald-500/25"
+                              : statusColor(captainShip.status) === "amber"
+                                ? "bg-amber-500/12 text-amber-300 ring-1 ring-amber-500/25"
+                                : "bg-red-500/12 text-red-300 ring-1 ring-red-500/25"
+                          }`}
+                        >
+                          {formatStatus(captainShip.status)}
+                        </span>
+                      </div>
+                      <div className="mb-3">
+                        <div className="mb-1.5 flex justify-between text-[9px]">
+                          <span className="uppercase tracking-wider text-slate-600">Fuel</span>
+                          <span className="font-mono text-slate-400">{captainShip.fuelTons.toFixed(0)} t</span>
+                        </div>
+                        <FuelBar fuel={captainShip.fuelTons} />
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 text-xs">
+                        {[
+                          ["Speed", `${captainShip.speedKnots.toFixed(1)} kt`],
+                          ["Heading", `${captainShip.headingDegrees.toFixed(0)}° ${toCardinal(captainShip.headingDegrees)}`],
+                          ["Dest", destName(captainShip.destinationPortId)],
+                          ["Cargo", captainShip.cargo],
+                        ].map(([label, val]) => (
+                          <div key={label}>
+                            <p className="text-[9px] uppercase tracking-wider text-slate-600">{label}</p>
+                            <p className="mt-0.5 font-mono text-tac-text-hi truncate">{val}</p>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                    <p className="mt-3 text-[10px] text-slate-600">
-                      Scoped to {captainShip.id}.
-                    </p>
                   </>
                 )}
               </div>
 
               {/* Pending Directives */}
               <div className="border-b border-white/6 p-4">
-                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
-                  Pending Directives
-                </p>
+                <div className="mb-3 flex items-center gap-2">
+                  <span className="h-3 w-0.5 rounded-full bg-amber-400/60" />
+                  <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">Pending Directives</p>
+                </div>
                 {pendingCaptainDirectives.length === 0 ? (
-                  <p className="text-xs text-slate-600">
+                  <p className="text-[10px] text-slate-600">
                     No directives awaiting response.
                   </p>
                 ) : (
                   pendingCaptainDirectives.map((directive) => (
                     <div
-                      className="border border-white/8 p-3"
+                      className="rounded-md border border-amber-400/15 border-l-2 border-l-amber-400/60 bg-amber-950/8 p-3"
                       key={directive.id}
                     >
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-semibold text-slate-200">
+                        <span className="text-sm font-semibold text-tac-text-hi">
                           {directiveLabels[directive.type]}
                         </span>
                         <span className="font-mono text-[10px] text-slate-600">
@@ -1665,7 +2171,7 @@ export default function Page() {
                         </span>
                       </div>
                       <textarea
-                        className="h-20 w-full border border-white/8 bg-black/20 p-2 text-xs text-slate-200 focus:border-cyan-400/40 focus:outline-none"
+                        className="h-20 w-full border border-white/8 bg-black/20 p-2 text-xs text-tac-text-hi focus:border-cyan-400/40 focus:outline-none"
                         onChange={(e) => setDistressMessage(e.target.value)}
                         placeholder="Describe injuries, fire, flooding, engine loss, cargo spill, or other impact."
                         value={distressMessage}
@@ -1707,9 +2213,10 @@ export default function Page() {
 
               {/* Visible Zones */}
               <div className="p-4">
-                <p className="mb-2 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
-                  Visible Zones
-                </p>
+                <div className="mb-2 flex items-center gap-2">
+                  <span className="h-3 w-0.5 rounded-full bg-red-400/60" />
+                  <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">Visible Zones</p>
+                </div>
                 <p className="text-xs text-slate-600">
                   {snapshot.restrictedZones.length} command zone
                   {snapshot.restrictedZones.length !== 1 ? "s" : ""} — read

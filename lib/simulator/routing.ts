@@ -1,6 +1,6 @@
 import { haversineDistanceKm, pointInPolygon } from "@/lib/geo";
 import { BASE_FUEL_TONS_PER_KM, resolveWeatherMultiplier } from "@/lib/simulator/core";
-import type { LatLng, RestrictedZone, RoutePlan, WeatherSample } from "@/lib/domain";
+import type { LatLng, RestrictedZone, RouteOption, RoutePlan, WeatherSample } from "@/lib/domain";
 
 type GraphNode = {
   id: string;
@@ -9,6 +9,12 @@ type GraphNode = {
 
 const SEGMENT_SAMPLES = 24;
 const WEATHER_COST_WEIGHT = 0.45;
+
+const ROUTE_COST_PROFILES = {
+  fastest: 0,
+  balanced: 0.45,
+  fuel_efficient: 2.0,
+} as const;
 
 function uniquePolygonPoints(polygon: LatLng[]): LatLng[] {
   const points = polygon.slice();
@@ -261,26 +267,45 @@ export function computeRoutePlan(args: {
     nodes.push({ id: `nav-${index}`, position: point });
   });
 
-  // Interior waypoints threading the Strait of Hormuz channel.
-  // The navigable polygon is too sparse here — polygon vertices sit on the
-  // boundary where ray-casting is unreliable, so Dijkstra needs explicit
-  // mid-channel nodes to bridge the Persian Gulf and Gulf of Oman.
-  // Every point below was verified inside the polygon via ray-casting and
-  // every consecutive segment was verified to stay inside with 24 samples.
-  const straitInteriorNodes: LatLng[] = [
-    [26.50, 56.00], // pre-strait approach
-    [26.47, 56.30], // strait western entrance
-    [26.47, 56.35], // strait mid-west
-    [26.48, 56.38], // strait central
-    [26.45, 56.40], // strait narrow point
-    [26.46, 56.43], // strait eastern exit (bridges to nav-15 [24.50,57.20])
-    [26.30, 56.55], // Gulf of Oman entry
-    [26.20, 56.62], // Gulf of Oman west
+  // Interior waypoints for the Strait of Hormuz channel — the navigable
+  // polygon is too sparse here, so Dijkstra needs explicit mid-channel nodes.
+  // Bypass nodes around each seeded restricted zone are also included so the
+  // router has guaranteed-clear corridors on every side of each zone.
+  const interiorNodes: LatLng[] = [
+    // ── North channel through the Strait of Hormuz (Iranian side) ────────
+    [26.50, 56.00], // pre-strait approach from west
+    [26.45, 56.25], // bypass south of Qeshm zone (26.65–27.05 N)
+    [26.42, 56.50], // north channel central passage (above Musandam)
+    [26.38, 56.75], // north channel eastern section
+    [26.30, 56.55], // Gulf of Oman entry (north)
+    [26.20, 56.62], // Gulf of Oman west (north lane)
     [26.10, 56.70], // Gulf of Oman mid
-    [25.90, 56.75], // Gulf of Oman
+    [25.90, 56.75], // Gulf of Oman south
+
+    // ── South channel through the Strait (below Musandam peninsula) ──────
+    [25.60, 55.95], // south channel approach from west
+    [25.55, 56.25], // south channel mid (below Musandam zone)
+    [25.60, 56.55], // south channel east (clear of Musandam)
+
+    // ── Bypass south of Hormuz Military Exclusion (starts at lng 56.40) ──
+    [26.60, 56.00], // west of Qeshm zone (moved south from 26.80 which was inside Qeshm)
+    [26.75, 56.50], // below Hormuz zone centre
+    [26.75, 57.00], // below Hormuz zone eastern edge
+
+    // ── Bypass around Abu Musa zone (25.72–26.05 N, 54.88–55.22 E) ──────
+    [26.10, 54.80], // north-west of Abu Musa
+    [26.10, 55.30], // north-east of Abu Musa
+    [25.60, 54.80], // south-west of Abu Musa (stays in open Gulf)
+    [25.60, 55.30], // south-east of Abu Musa
+
+    // ── Bypass around Farsi Island zone (26.3–26.85 N, 53.85–54.5 E) ────
+    [26.20, 53.75], // south-west of Farsi zone
+    [26.20, 54.55], // south-east of Farsi zone
+    [26.90, 53.75], // north-west of Farsi zone
+    [26.90, 54.55], // north-east of Farsi zone
   ];
-  straitInteriorNodes.forEach((point, index) => {
-    nodes.push({ id: `strait-${index}`, position: point });
+  interiorNodes.forEach((point, index) => {
+    nodes.push({ id: `interior-${index}`, position: point });
   });
 
   if (startInsideZones.length > 0) {
@@ -365,4 +390,137 @@ export function computeRoutePlan(args: {
     weatherExposure: hasAdverse ? "adverse" : "clear",
     valid: true,
   };
+}
+
+function computeRoutePlanWithCostWeight(
+  args: Parameters<typeof computeRoutePlan>[0],
+  weatherCostWeight: number,
+): RoutePlan {
+  // Temporarily override the segment cost function by injecting weight via closure
+  // We rebuild edges using a local cost function instead of the module-level WEATHER_COST_WEIGHT
+  const activeZones = args.restrictedZones.filter((zone) => zone.active);
+  const startInsideZones = activeZones.filter((zone) => pointInPolygon(args.start, zone.polygon));
+  const destinationInsideBlockedZone = activeZones.some((zone) =>
+    pointInPolygon(args.destination, zone.polygon),
+  );
+
+  if (
+    !pointInPolygon(args.start, args.navigableWater) ||
+    !pointInPolygon(args.destination, args.navigableWater) ||
+    destinationInsideBlockedZone
+  ) {
+    return computeRoutePlan(args);
+  }
+
+  const nodes: Array<{ id: string; position: LatLng }> = [
+    { id: "start", position: args.start },
+    { id: "end", position: args.destination },
+  ];
+
+  activeZones.forEach((zone, zoneIndex) => {
+    uniquePolygonPoints(zone.polygon).forEach((point, pointIndex) => {
+      if (pointInPolygon(point, args.navigableWater)) {
+        nodes.push({ id: `zone-${zoneIndex}-p-${pointIndex}`, position: point });
+      }
+    });
+  });
+
+  uniquePolygonPoints(args.navigableWater).forEach((point, index) => {
+    nodes.push({ id: `nav-${index}`, position: point });
+  });
+
+  const interiorNodes: LatLng[] = [
+    [26.50, 56.00], [26.45, 56.25], [26.42, 56.50], [26.38, 56.75],
+    [26.30, 56.55], [26.20, 56.62], [26.10, 56.70], [25.90, 56.75],
+    [25.60, 55.95], [25.55, 56.25], [25.60, 56.55],
+    [26.60, 56.00], [26.75, 56.50], [26.75, 57.00],
+    [26.10, 54.80], [26.10, 55.30], [25.60, 54.80], [25.60, 55.30],
+    [26.20, 53.75], [26.20, 54.55], [26.90, 53.75], [26.90, 54.55],
+  ];
+  interiorNodes.forEach((point, index) => {
+    nodes.push({ id: `interior-${index}`, position: point });
+  });
+
+  if (startInsideZones.length > 0) {
+    startInsideZones.forEach((zone, index) => {
+      const exit = nearestExitPoint(args.start, zone, args.navigableWater);
+      if (exit) nodes.push({ id: `exit-${index}`, position: exit });
+    });
+  }
+
+  const edges = new Map<string, Array<{ to: string; weight: number }>>();
+  for (let i = 0; i < nodes.length; i += 1) {
+    const a = nodes[i];
+    for (let j = i + 1; j < nodes.length; j += 1) {
+      const b = nodes[j];
+      const allowStartEscape = new Set<string>();
+      if (a.id === "start" || b.id === "start") {
+        startInsideZones.forEach((zone) => allowStartEscape.add(zone.id));
+      }
+      if (isSegmentNavigable(a.position, b.position, args.navigableWater, activeZones, allowStartEscape)) {
+        const distanceKm = haversineDistanceKm(a.position, b.position);
+        const weatherMultiplier = segmentWeatherMultiplier(a.position, b.position, args.weatherSamples ?? []);
+        const weight = distanceKm * (1 + (weatherMultiplier - 1) * weatherCostWeight);
+        if (!edges.has(a.id)) edges.set(a.id, []);
+        if (!edges.has(b.id)) edges.set(b.id, []);
+        edges.get(a.id)?.push({ to: b.id, weight });
+        edges.get(b.id)?.push({ to: a.id, weight });
+      }
+    }
+  }
+
+  const pathNodeIds = shortestPath(nodes, edges);
+  if (pathNodeIds.length === 0) {
+    return computeRoutePlan(args);
+  }
+
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  const waypoints = pathNodeIds
+    .map((id) => nodeById.get(id)?.position)
+    .filter((p): p is LatLng => Boolean(p));
+  const distanceKm = waypoints.reduce((total, wp, i) => {
+    if (i === 0) return total;
+    return total + haversineDistanceKm(waypoints[i - 1], wp);
+  }, 0);
+  const samples = args.weatherSamples ?? [];
+  const hasAdverse = routeHasAdverseWeather(waypoints, samples);
+  const avgMultiplier =
+    samples.length === 0
+      ? 1
+      : waypoints.reduce((sum, pt) => sum + resolveWeatherMultiplier(pt, samples), 0) / waypoints.length;
+
+  return {
+    shipId: args.shipId,
+    waypoints,
+    distanceKm,
+    estimatedFuelTons: estimateRouteFuel(distanceKm, avgMultiplier),
+    weatherExposure: hasAdverse ? "adverse" : "clear",
+    valid: true,
+  };
+}
+
+export function computeRouteOptions(args: Parameters<typeof computeRoutePlan>[0]): RouteOption[] {
+  const options: Array<{ label: RouteOption["label"]; weight: number }> = [
+    { label: "fastest", weight: ROUTE_COST_PROFILES.fastest },
+    { label: "balanced", weight: ROUTE_COST_PROFILES.balanced },
+    { label: "fuel_efficient", weight: ROUTE_COST_PROFILES.fuel_efficient },
+  ];
+
+  return options.map(({ label, weight }) => {
+    const plan = computeRoutePlanWithCostWeight(args, weight);
+    const km = Math.round(plan.distanceKm);
+    const fuel = Math.round(plan.estimatedFuelTons);
+    const weather = plan.weatherExposure === "adverse" ? "adverse weather" : "clear skies";
+
+    let tradeoffSummary = "";
+    if (label === "fastest") {
+      tradeoffSummary = `${km} km · ${fuel} t fuel · ${weather}. Shortest path; ignores weather cost.`;
+    } else if (label === "balanced") {
+      tradeoffSummary = `${km} km · ${fuel} t fuel · ${weather}. Default routing; mild weather avoidance.`;
+    } else {
+      tradeoffSummary = `${km} km · ${fuel} t fuel · ${weather}. Longer path; avoids adverse weather corridors.`;
+    }
+
+    return { ...plan, label, tradeoffSummary };
+  });
 }

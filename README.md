@@ -1,8 +1,18 @@
 # Fleet Crisis Command
 
+Built by **Vibe Coders**.
+
 Local realtime simulator for the Code Rush Web Dev Track fleet-crisis scenario. The app loads the fixed 15-ship Strait of Hormuz scenario from `public/fleet.json`, advances an authoritative in-memory backend state at 1 Hz, and streams snapshots to connected viewers over a persistent Server-Sent Events connection.
 
 ## Getting Started
+
+Run the full system with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the command system.
 
 Use pnpm for local development:
 
@@ -10,13 +20,13 @@ Use pnpm for local development:
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the command system.
-
 If `pnpm` is not on PATH, use Corepack:
 
 ```bash
 corepack pnpm dev
 ```
+
+**No internet connection required.** The app runs fully offline — Open-Meteo weather fetches degrade gracefully to zero samples on failure, and distress analysis falls back to local rule-based extraction when `XAI_API_KEY` is unset or unreachable. All 15 ships simulate, route, and alert without any external dependency.
 
 ## API Routes
 
@@ -40,6 +50,12 @@ Weather data is fetched from the [Open-Meteo](https://open-meteo.com/) free tier
 | `XAI_API_KEY` | Optional | Enables Grok (`grok-latest`) AI distress analysis. Falls back to local rules if unset or if the API call fails. |
 
 Set in `.env.local`:
+```
+XAI_API_KEY=your_key_here
+```
+
+For Docker Compose, set the same optional variable in `.env` before running `docker compose up --build`:
+
 ```
 XAI_API_KEY=your_key_here
 ```
@@ -90,10 +106,10 @@ Severity is priority-scored from both keywords and quantified impacts. For examp
 ## Verification
 
 ```bash
-pnpm lint
-pnpm build
-pnpm verify:sim
+pnpm verify
 ```
+
+`pnpm verify` runs lint, production build, and simulator core checks.
 
 Manual browser checks: live fleet updates, directive issue → captain accept/escalate, restricted-zone draw → auto-reroute, geofence breach alert → acknowledge, proximity alert, distress analysis, weather overlay, playback scrubbing.
 
@@ -102,6 +118,16 @@ With the dev server already running, verify five simultaneous SSE viewers and th
 ```bash
 pnpm verify:realtime
 ```
+
+## Judge Demo Runbook
+
+1. Start with `pnpm dev` and open [http://localhost:3000](http://localhost:3000).
+2. Confirm the command map shows 15 moving ships, live SSE status, weather overlays, ports, routes, and any active alerts.
+3. Select a ship, issue a `Hold` or `Reroute` directive, switch to **CPT**, and accept it to show role-scoped captain workflow.
+4. Switch back to **CMD**, use **Box Ship** or draw a zone around/near a ship to trigger geofence breach, alerting, and auto-reroute behavior.
+5. Issue another directive, switch to **CPT**, edit the distress text with quantified impact such as `5 crew injured, 80% engine power loss`, then escalate to show structured distress priority.
+6. Acknowledge an active alert from the command panel.
+7. After at least 30 seconds of runtime, open **Playback → Review**, scrub frames, inspect key events, then return to **Live** to show playback does not mutate live state.
 
 ## Assumptions
 
