@@ -217,6 +217,11 @@ export type SimulatorCommand =
       polygon: LatLng[];
     }
   | {
+      type: "set_zone_active";
+      zoneId: string;
+      active: boolean;
+    }
+  | {
       type: "ack_alert";
       alertId: string;
     };

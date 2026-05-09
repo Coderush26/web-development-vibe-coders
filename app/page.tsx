@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { interpolateLatLng } from "@/lib/geo";
+import { Button } from "@/components/ui/button";
 import type {
   AlertSeverity,
   DirectiveType,
@@ -52,9 +53,13 @@ function toCardinal(deg: number): string {
   return dirs[Math.round(deg / 45) % 8];
 }
 
-function postJson(path: string, body: unknown): Promise<void> {
+function postJson(
+  path: string,
+  body: unknown,
+  method: "POST" | "PATCH" = "POST",
+): Promise<void> {
   return fetch(path, {
-    method: "POST",
+    method,
     headers: {
       "Content-Type": "application/json",
     },
@@ -111,7 +116,12 @@ export default function Page() {
   const [now, setNow] = useState(0);
   const [connectionState, setConnectionState] = useState("connecting");
   const [streamLagMs, setStreamLagMs] = useState(0);
+  const [playbackIndex, setPlaybackIndex] = useState<number | null>(null);
   const latestVersionRef = useRef(-1);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [drawingMode, setDrawingMode] = useState(false);
+  const [draftPolygon, setDraftPolygon] = useState<LatLng[]>([]);
+  const [mouseMapPos, setMouseMapPos] = useState<[number, number] | null>(null);
 
   useEffect(() => {
     const source = new EventSource("/api/sim/stream");
@@ -156,14 +166,56 @@ export default function Page() {
     }));
   }, [now, snapshot]);
 
+  const playbackCursor =
+    playbackIndex !== null && snapshot
+      ? Math.min(playbackIndex, Math.max(0, snapshot.history.length - 1))
+      : 0;
+  const playbackFrame =
+    playbackIndex !== null && snapshot && snapshot.history.length > 0
+      ? snapshot.history[playbackCursor]
+      : undefined;
+  const inPlayback = Boolean(playbackFrame);
+
+  const renderedShips = useMemo(() => {
+    if (!snapshot) {
+      return [];
+    }
+
+    if (!playbackFrame) {
+      return visibleShips;
+    }
+
+    const byId = new Map(
+      playbackFrame.shipPositions.map((position) => [
+        position.shipId,
+        position,
+      ]),
+    );
+    return snapshot.ships.map((ship) => {
+      const historical = byId.get(ship.id);
+      if (!historical) {
+        return ship;
+      }
+
+      return {
+        ...ship,
+        position: historical.position,
+        previousPosition: historical.position,
+        status: historical.status,
+        fuelTons: historical.fuelTons,
+      };
+    });
+  }, [playbackFrame, snapshot, visibleShips]);
+
   const selectedShip =
-    visibleShips.find((ship) => ship.id === selectedShipId) ?? visibleShips[0];
+    renderedShips.find((ship) => ship.id === selectedShipId) ??
+    renderedShips[0];
   const captainShip =
-    visibleShips.find((ship) => ship.id === captainShipId) ?? visibleShips[0];
+    renderedShips.find((ship) => ship.id === captainShipId) ?? renderedShips[0];
   const listedShips =
     role === "command"
-      ? visibleShips
-      : visibleShips.filter((ship) => ship.id === captainShipId);
+      ? renderedShips
+      : renderedShips.filter((ship) => ship.id === captainShipId);
   const pendingCaptainDirectives =
     snapshot?.directives.filter(
       (directive) =>
@@ -171,9 +223,11 @@ export default function Page() {
         directive.status === "pending",
     ) ?? [];
   const activeAlerts =
-    snapshot?.alerts.filter(
-      (alert) => !alert.resolvedAt && !alert.acknowledgedAt,
-    ) ?? [];
+    (inPlayback
+      ? []
+      : snapshot?.alerts.filter(
+          (alert) => !alert.resolvedAt && !alert.acknowledgedAt,
+        )) ?? [];
 
   function project(point: LatLng): [number, number] {
     if (!snapshot) {
@@ -274,6 +328,67 @@ export default function Page() {
     });
   }
 
+  async function setZoneActive(zoneId: string, active: boolean) {
+    await postJson("/api/sim/zones", { zoneId, active }, "PATCH");
+  }
+
+  function unproject(x: number, y: number): LatLng {
+    const bb = snapshot!.boundingBox;
+    const lat = bb.north - (y / MAP_HEIGHT) * (bb.north - bb.south);
+    const lng = bb.west + (x / MAP_WIDTH) * (bb.east - bb.west);
+    return [lat, lng];
+  }
+
+  function getSvgPoint(
+    e: React.MouseEvent<SVGSVGElement>,
+  ): [number, number] | null {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    const parts = mapViewBox.split(" ").map(Number);
+    const [vx, vy, vw, vh] = parts;
+    const x = vx + ((e.clientX - rect.left) / rect.width) * vw;
+    const y = vy + ((e.clientY - rect.top) / rect.height) * vh;
+    return [x, y];
+  }
+
+  function handleMapClick(e: React.MouseEvent<SVGSVGElement>) {
+    if (!drawingMode || inPlayback || !snapshot) return;
+    const pt = getSvgPoint(e);
+    if (!pt) return;
+    if (draftPolygon.length >= 3) {
+      const [fx, fy] = project(draftPolygon[0]);
+      if (Math.hypot(pt[0] - fx, pt[1] - fy) < 14) {
+        submitDrawnZone();
+        return;
+      }
+    }
+    setDraftPolygon((prev) => [...prev, unproject(pt[0], pt[1])]);
+  }
+
+  function handleMapMouseMove(e: React.MouseEvent<SVGSVGElement>) {
+    if (!drawingMode) return;
+    setMouseMapPos(getSvgPoint(e));
+  }
+
+  async function submitDrawnZone() {
+    if (draftPolygon.length < 3) return;
+    const closed: LatLng[] = [...draftPolygon, draftPolygon[0]];
+    await postJson("/api/sim/zones", {
+      name: `Zone-${new Date().toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
+      polygon: closed,
+    });
+    setDraftPolygon([]);
+    setDrawingMode(false);
+    setMouseMapPos(null);
+  }
+
+  function cancelDrawing() {
+    setDraftPolygon([]);
+    setDrawingMode(false);
+    setMouseMapPos(null);
+  }
+
   if (!snapshot) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-[#050d12] text-slate-100">
@@ -315,6 +430,14 @@ export default function Page() {
                   {snapshot.metrics.activeShips} ships
                 </span>
                 &ensp;·&ensp;tick {snapshot.tick}
+                {inPlayback && playbackFrame ? (
+                  <>
+                    &ensp;·&ensp;
+                    <span className="text-amber-300">
+                      playback {formatTime(playbackFrame.timestamp)}
+                    </span>
+                  </>
+                ) : null}
               </p>
             </div>
           </div>
@@ -412,13 +535,21 @@ export default function Page() {
         </aside>
 
         {/* ── Map ── */}
-        <section className="relative map-scanlines bg-[#061018] flex flex-col">
+        <section className="map-scanlines bg-[#061018] flex flex-col">
           <svg
             className="w-full"
-            style={{ minHeight: 260, height: "100%", flex: "1 1 0%" }}
+            style={{
+              minHeight: 260,
+              flex: "1 1 0%",
+              cursor: drawingMode ? "crosshair" : "default",
+            }}
             viewBox={mapViewBox}
             role="img"
             preserveAspectRatio="xMidYMid meet"
+            ref={svgRef}
+            onClick={handleMapClick}
+            onMouseMove={handleMapMouseMove}
+            onMouseLeave={() => setMouseMapPos(null)}
           >
             <defs>
               <pattern
@@ -491,6 +622,52 @@ export default function Page() {
               />
             ))}
 
+            {/* Zone draw overlay */}
+            {drawingMode && (
+              <g>
+                {draftPolygon.length > 1 && (
+                  <polyline
+                    fill="none"
+                    points={draftPolygon
+                      .map((p) => project(p).join(","))
+                      .join(" ")}
+                    stroke="rgba(239,68,68,0.85)"
+                    strokeDasharray="6 3"
+                    strokeWidth="2"
+                  />
+                )}
+                {mouseMapPos && draftPolygon.length > 0 && (
+                  <line
+                    stroke="rgba(239,68,68,0.45)"
+                    strokeDasharray="4 3"
+                    strokeWidth="1.5"
+                    x1={project(draftPolygon[draftPolygon.length - 1])[0]}
+                    x2={mouseMapPos[0]}
+                    y1={project(draftPolygon[draftPolygon.length - 1])[1]}
+                    y2={mouseMapPos[1]}
+                  />
+                )}
+                {draftPolygon.map((p, i) => {
+                  const [x, y] = project(p);
+                  const isFirst = i === 0 && draftPolygon.length >= 3;
+                  return (
+                    <circle
+                      key={i}
+                      cx={x}
+                      cy={y}
+                      fill={
+                        isFirst ? "rgba(239,68,68,0.9)" : "rgba(239,68,68,0.6)"
+                      }
+                      r={isFirst ? 9 : 5}
+                      stroke="white"
+                      strokeWidth="1.5"
+                      style={isFirst ? { cursor: "pointer" } : undefined}
+                    />
+                  );
+                })}
+              </g>
+            )}
+
             {/* Weather samples */}
             {snapshot.weatherSamples.map((sample) => {
               const [x, y] = project(sample.position);
@@ -529,26 +706,24 @@ export default function Page() {
               );
             })}
 
-            {/* Routes */}
-            {visibleShips.map((ship) => {
-              const pts = ship.currentRoute.waypoints
-                .map((p) => project(p).join(","))
-                .join(" ");
-              if (!pts) return null;
-              const sel = ship.id === selectedShipId;
-              return (
-                <polyline
-                  fill="none"
-                  key={`route-${ship.id}`}
-                  points={pts}
-                  stroke={
-                    sel ? "rgba(6,182,212,0.9)" : "rgba(148,163,184,0.25)"
-                  }
-                  strokeDasharray={sel ? "0" : "6 5"}
-                  strokeWidth={sel ? "2" : "1"}
-                />
-              );
-            })}
+            {/* Routes — only selected ship */}
+            {renderedShips
+              .filter((ship) => ship.id === selectedShipId)
+              .map((ship) => {
+                const pts = ship.currentRoute.waypoints
+                  .map((p) => project(p).join(","))
+                  .join(" ");
+                if (!pts) return null;
+                return (
+                  <polyline
+                    fill="none"
+                    key={`route-${ship.id}`}
+                    points={pts}
+                    stroke="rgba(6,182,212,0.9)"
+                    strokeWidth="2"
+                  />
+                );
+              })}
 
             {/* Ports */}
             {snapshot.ports.map((port) => {
@@ -577,7 +752,7 @@ export default function Page() {
             })}
 
             {/* Ships */}
-            {visibleShips.map((ship) => {
+            {renderedShips.map((ship) => {
               const [x, y] = project(ship.position);
               const sel = ship.id === selectedShipId;
               const sc = statusColor(ship.status);
@@ -593,8 +768,10 @@ export default function Page() {
                   className="cursor-pointer"
                   key={ship.id}
                   onClick={() => {
-                    setSelectedShipId(ship.id);
-                    setCaptainShipId(ship.id);
+                    if (role === "command") {
+                      setSelectedShipId(ship.id);
+                      setCaptainShipId(ship.id);
+                    }
                   }}
                 >
                   {sel && (
@@ -626,20 +803,18 @@ export default function Page() {
                       strokeWidth="1.5"
                     />
                   </g>
-                  {sel && (
-                    <text
-                      fill="#22d3ee"
-                      fontSize="11"
-                      fontWeight="700"
-                      textAnchor="middle"
-                      x={x}
-                      y={y - 26}
-                      letterSpacing="0.5"
-                      style={{ pointerEvents: "none" }}
-                    >
-                      {ship.name}
-                    </text>
-                  )}
+                  <text
+                    fill={sel ? "#22d3ee" : "rgba(148,163,184,0.7)"}
+                    fontSize={sel ? "11" : "9"}
+                    fontWeight={sel ? "700" : "500"}
+                    textAnchor="middle"
+                    x={x}
+                    y={y - (sel ? 26 : 20)}
+                    letterSpacing="0.5"
+                    style={{ pointerEvents: "none" }}
+                  >
+                    {sel ? ship.name : ship.id}
+                  </text>
                 </g>
               );
             })}
@@ -677,7 +852,7 @@ export default function Page() {
           </svg>
 
           {/* Map status bar */}
-          <div className="absolute bottom-0 left-0 right-0 flex items-center gap-0 border-t border-white/6 bg-black/40 text-[10px] text-slate-500 uppercase tracking-wider backdrop-blur-sm">
+          <div className="flex shrink-0 items-center gap-0 border-t border-white/6 bg-black/40 text-[10px] text-slate-500 uppercase tracking-wider backdrop-blur-sm">
             <span className="border-r border-white/6 px-3 py-2 text-emerald-400">
               ● SSE 1Hz
             </span>
@@ -685,7 +860,7 @@ export default function Page() {
               Interp active
             </span>
             <span className="border-r border-white/6 px-3 py-2">
-              {visibleShips.length} routes
+              {renderedShips.length} routes
             </span>
             <span className="border-r border-white/6 px-3 py-2">
               {snapshot.weatherSamples.length} wx
@@ -707,6 +882,55 @@ export default function Page() {
         <aside className="thin-scroll flex flex-col overflow-y-auto border-t border-white/6 bg-[#07151a] lg:border-t-0 lg:border-l">
           {role === "command" ? (
             <>
+              {/* Playback controls */}
+              <div className="border-b border-white/6 p-4">
+                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
+                  Playback
+                </p>
+                <div className="flex items-center gap-2">
+                  <Button
+                    onClick={() => setPlaybackIndex(null)}
+                    size="sm"
+                    type="button"
+                    variant={!inPlayback ? "default" : "ghost"}
+                  >
+                    Live
+                  </Button>
+                  <Button
+                    disabled={snapshot.history.length === 0}
+                    onClick={() => {
+                      if (snapshot.history.length > 0) {
+                        setPlaybackIndex(playbackIndex ?? 0);
+                      }
+                    }}
+                    size="sm"
+                    type="button"
+                    variant={inPlayback ? "default" : "outline"}
+                  >
+                    Review
+                  </Button>
+                </div>
+                <input
+                  className="mt-3 w-full accent-cyan-400"
+                  disabled={snapshot.history.length === 0}
+                  max={Math.max(0, snapshot.history.length - 1)}
+                  min={0}
+                  onChange={(event) =>
+                    setPlaybackIndex(Number(event.target.value))
+                  }
+                  type="range"
+                  value={playbackCursor}
+                />
+                <p className="mt-2 text-[10px] text-slate-500">
+                  {inPlayback && playbackFrame
+                    ? `Viewing ${formatTime(playbackFrame.timestamp)} (${playbackCursor}/${Math.max(
+                        0,
+                        snapshot.history.length - 1,
+                      )})`
+                    : `Live mode (${snapshot.history.length} history points available)`}
+                </p>
+              </div>
+
               {/* Selected Ship */}
               <div className="border-b border-white/6 p-4">
                 <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
@@ -814,20 +1038,100 @@ export default function Page() {
                       ))}
                     </select>
                   )}
-                  <button
-                    className="w-full bg-cyan-400 py-2 text-xs font-bold uppercase tracking-widest text-slate-950 hover:bg-cyan-300 transition-colors"
+                  <Button
+                    className="w-full uppercase tracking-widest text-xs"
+                    disabled={inPlayback}
                     type="submit"
                   >
                     Issue to {selectedShip?.name}
-                  </button>
-                  <button
-                    className="w-full border border-white/10 py-2 text-xs text-slate-400 hover:border-red-500/40 hover:text-red-300 transition-colors"
-                    onClick={createZoneAroundShip}
-                    type="button"
-                  >
-                    Create Zone Around Ship
-                  </button>
+                  </Button>
+                  {drawingMode ? (
+                    <div className="space-y-1.5">
+                      <p className="text-center text-[10px] text-red-300">
+                        {draftPolygon.length < 3
+                          ? `Click map to add vertices (${draftPolygon.length}/3 min)`
+                          : `${draftPolygon.length} pts — click first dot or Save to close`}
+                      </p>
+                      <div className="flex gap-1.5">
+                        <Button
+                          className="flex-1 text-xs"
+                          disabled={draftPolygon.length < 3}
+                          onClick={submitDrawnZone}
+                          type="button"
+                          variant="destructive"
+                        >
+                          Save Zone
+                        </Button>
+                        <Button
+                          className="flex-1 text-xs"
+                          onClick={cancelDrawing}
+                          type="button"
+                          variant="outline"
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex gap-1.5">
+                      <Button
+                        className="flex-1 text-xs"
+                        disabled={inPlayback}
+                        onClick={() => setDrawingMode(true)}
+                        type="button"
+                        variant="destructive"
+                      >
+                        Draw Zone
+                      </Button>
+                      <Button
+                        className="flex-1 text-xs"
+                        disabled={inPlayback}
+                        onClick={createZoneAroundShip}
+                        type="button"
+                        variant="outline"
+                      >
+                        Box Ship
+                      </Button>
+                    </div>
+                  )}
                 </form>
+              </div>
+
+              {/* Zone editing */}
+              <div className="border-b border-white/6 p-4">
+                <p className="mb-3 text-[9px] font-bold uppercase tracking-[0.25em] text-slate-500">
+                  Zone Editing
+                </p>
+                {snapshot.restrictedZones.length === 0 ? (
+                  <p className="text-xs text-slate-600">
+                    No restricted zones yet.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {snapshot.restrictedZones.map((zone) => (
+                      <div
+                        className="flex items-center justify-between border border-white/8 p-2"
+                        key={zone.id}
+                      >
+                        <div>
+                          <p className="text-xs text-slate-200">{zone.name}</p>
+                          <p className="text-[10px] text-slate-600">
+                            {zone.active ? "active" : "inactive"}
+                          </p>
+                        </div>
+                        <Button
+                          disabled={inPlayback}
+                          onClick={() => setZoneActive(zone.id, !zone.active)}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          {zone.active ? "Deactivate" : "Activate"}
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Alerts */}
@@ -853,17 +1157,20 @@ export default function Page() {
                       >
                         <div className="flex items-start justify-between gap-2">
                           <p className="leading-snug">{alert.message}</p>
-                          <button
-                            className="shrink-0 border border-white/15 px-2 py-0.5 text-[10px] hover:bg-white/8"
+                          <Button
+                            className="shrink-0"
+                            disabled={inPlayback}
                             onClick={() =>
                               postJson("/api/sim/alerts/ack", {
                                 alertId: alert.id,
                               })
                             }
+                            size="sm"
                             type="button"
+                            variant="outline"
                           >
                             Ack
-                          </button>
+                          </Button>
                         </div>
                         <p className="mt-1.5 text-[10px] opacity-50">
                           {alert.type} · {formatTime(alert.createdAt)}
@@ -955,17 +1262,19 @@ export default function Page() {
                         value={distressMessage}
                       />
                       <div className="mt-2 grid grid-cols-2 gap-2">
-                        <button
-                          className="bg-emerald-400 py-2 text-xs font-bold uppercase tracking-wider text-slate-950 hover:bg-emerald-300"
+                        <Button
+                          className="w-full text-xs uppercase tracking-wider bg-emerald-400 text-slate-950 hover:bg-emerald-300"
+                          disabled={inPlayback}
                           onClick={() =>
                             respondToDirective(directive.id, "ACCEPT")
                           }
                           type="button"
                         >
                           Accept
-                        </button>
-                        <button
-                          className="border border-red-500/40 py-2 text-xs text-red-300 hover:bg-red-500/10"
+                        </Button>
+                        <Button
+                          className="w-full text-xs"
+                          disabled={inPlayback}
                           onClick={() =>
                             respondToDirective(
                               directive.id,
@@ -973,9 +1282,10 @@ export default function Page() {
                             )
                           }
                           type="button"
+                          variant="destructive"
                         >
                           Escalate
-                        </button>
+                        </Button>
                       </div>
                     </div>
                   ))

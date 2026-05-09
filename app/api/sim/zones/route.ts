@@ -38,3 +38,28 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   return NextResponse.json(snapshot);
 }
+
+export async function PATCH(request: NextRequest): Promise<NextResponse> {
+  let body: {
+    zoneId?: string;
+    active?: boolean;
+  };
+
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
+
+  if (!body.zoneId || typeof body.active !== "boolean") {
+    return NextResponse.json({ error: "Missing zoneId or active flag." }, { status: 400 });
+  }
+
+  const snapshot = getSimulatorStore().dispatch({
+    type: "set_zone_active",
+    zoneId: body.zoneId,
+    active: body.active,
+  });
+
+  return NextResponse.json(snapshot);
+}

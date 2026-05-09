@@ -208,6 +208,10 @@ export class SimulatorStore {
       this.createRestrictedZone(command.name, command.polygon);
     }
 
+    if (command.type === "set_zone_active") {
+      this.setZoneActive(command.zoneId, command.active);
+    }
+
     if (command.type === "ack_alert") {
       this.acknowledgeAlert(command.alertId);
     }
@@ -549,6 +553,27 @@ export class SimulatorStore {
 
       return ship;
     });
+  }
+
+  private setZoneActive(zoneId: string, active: boolean): void {
+    const zone = this.restrictedZones.find((candidate) => candidate.id === zoneId);
+
+    if (!zone) {
+      return;
+    }
+
+    zone.active = active;
+    zone.updatedAt = Date.now();
+    this.keyEvents.push(`${zone.name} ${active ? "activated" : "deactivated"}.`);
+
+    if (!active) {
+      const now = Date.now();
+      this.alerts = this.alerts.map((alert) =>
+        alert.sourceEventId.endsWith(`:${zone.id}`) && !alert.resolvedAt
+          ? { ...alert, resolvedAt: now }
+          : alert,
+      );
+    }
   }
 
   private acknowledgeAlert(alertId: string): void {
