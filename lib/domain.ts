@@ -224,4 +224,8 @@ export type SimulatorCommand =
   | {
       type: "ack_alert";
       alertId: string;
+    }
+  | {
+      type: "update_weather";
+      samples: WeatherSample[];
     };

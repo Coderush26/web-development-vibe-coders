@@ -1,6 +1,6 @@
 import { haversineDistanceKm, pointInPolygon } from "@/lib/geo";
-import { BASE_FUEL_TONS_PER_KM } from "@/lib/simulator/core";
-import type { LatLng, RestrictedZone, RoutePlan } from "@/lib/domain";
+import { BASE_FUEL_TONS_PER_KM, resolveWeatherMultiplier } from "@/lib/simulator/core";
+import type { LatLng, RestrictedZone, RoutePlan, WeatherSample } from "@/lib/domain";
 
 type GraphNode = {
   id: string;
@@ -146,8 +146,13 @@ function shortestPath(nodes: GraphNode[], edges: Map<string, Array<{ to: string;
   return path[0] === startId ? path : [];
 }
 
-function estimateRouteFuel(distanceKm: number): number {
-  return distanceKm * BASE_FUEL_TONS_PER_KM;
+function estimateRouteFuel(distanceKm: number, weatherMultiplier = 1): number {
+  return distanceKm * BASE_FUEL_TONS_PER_KM * weatherMultiplier;
+}
+
+function routeHasAdverseWeather(waypoints: LatLng[], weatherSamples: WeatherSample[]): boolean {
+  if (weatherSamples.length === 0) return false;
+  return waypoints.some((pt) => resolveWeatherMultiplier(pt, weatherSamples) > 1);
 }
 
 export function routeIntersectsZone(routeWaypoints: LatLng[], zonePolygon: LatLng[]): boolean {
@@ -176,6 +181,7 @@ export function computeRoutePlan(args: {
   destination: LatLng;
   navigableWater: LatLng[];
   restrictedZones: RestrictedZone[];
+  weatherSamples?: WeatherSample[];
 }): RoutePlan {
   const activeZones = args.restrictedZones.filter((zone) => zone.active);
   const startInsideZones = activeZones.filter((zone) => pointInPolygon(args.start, zone.polygon));
@@ -311,12 +317,21 @@ export function computeRoutePlan(args: {
     return total + haversineDistanceKm(waypoints[index - 1], waypoint);
   }, 0);
 
+  const samples = args.weatherSamples ?? [];
+  const hasAdverse = routeHasAdverseWeather(waypoints, samples);
+  // Use average weather multiplier along the route for fuel estimate
+  const avgMultiplier =
+    samples.length === 0
+      ? 1
+      : waypoints.reduce((sum, pt) => sum + resolveWeatherMultiplier(pt, samples), 0) /
+        waypoints.length;
+
   return {
     shipId: args.shipId,
     waypoints,
     distanceKm,
-    estimatedFuelTons: estimateRouteFuel(distanceKm),
-    weatherExposure: "clear",
+    estimatedFuelTons: estimateRouteFuel(distanceKm, avgMultiplier),
+    weatherExposure: hasAdverse ? "adverse" : "clear",
     valid: true,
   };
 }

@@ -21,6 +21,7 @@ import {
   updateRemainingRoute,
 } from "@/lib/simulator/core";
 import { computeRoutePlan, routeIntersectsZone } from "@/lib/simulator/routing";
+import { fetchWeatherSamples } from "@/lib/simulator/weather";
 import type {
   Alert,
   AlertSeverity,
@@ -38,6 +39,9 @@ import type {
 } from "@/lib/domain";
 
 type Listener = (snapshot: SimulatorSnapshot) => void;
+
+// Refresh weather from Open-Meteo every 10 minutes
+const WEATHER_REFRESH_MS = 10 * 60 * 1000;
 
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -106,6 +110,7 @@ export class SimulatorStore {
   private tickCount = 0;
   private stateVersion = 0;
   private timer?: NodeJS.Timeout;
+  private weatherTimer?: NodeJS.Timeout;
   private lastTickAt = Date.now();
   private lastHistoryAt = 0;
 
@@ -135,6 +140,7 @@ export class SimulatorStore {
           destination: destination.position,
           navigableWater: this.seed.navigableWater,
           restrictedZones: this.restrictedZones,
+          weatherSamples: this.weatherSamples,
         }),
         activeWaypointIndex: 1,
         lastUpdateAt: Date.now(),
@@ -163,6 +169,24 @@ export class SimulatorStore {
 
     this.lastTickAt = Date.now();
     this.timer = setInterval(() => this.tick(), SIM_TICK_MS);
+
+    // Initial weather fetch on startup (non-blocking)
+    this.refreshWeather();
+    this.weatherTimer = setInterval(() => this.refreshWeather(), WEATHER_REFRESH_MS);
+  }
+
+  private refreshWeather(): void {
+    fetchWeatherSamples()
+      .then((samples) => {
+        if (samples.length > 0) {
+          this.weatherSamples = samples;
+          this.stateVersion += 1;
+          this.broadcast();
+        }
+      })
+      .catch(() => {
+        // Keep existing samples if fetch fails — sim continues with last known data
+      });
   }
 
   subscribe(listener: Listener): () => void {
@@ -220,6 +244,10 @@ export class SimulatorStore {
 
     if (command.type === "ack_alert") {
       this.acknowledgeAlert(command.alertId);
+    }
+
+    if (command.type === "update_weather") {
+      this.weatherSamples = command.samples;
     }
 
     this.stateVersion += 1;
@@ -707,6 +735,7 @@ export class SimulatorStore {
       destination: destination.position,
       navigableWater: this.seed.navigableWater,
       restrictedZones: this.restrictedZones,
+      weatherSamples: this.weatherSamples,
     });
 
     if (!nextRoute.valid) {
