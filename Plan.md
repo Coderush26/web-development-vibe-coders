@@ -22,7 +22,7 @@ The system must keep the fleet visible, controllable, and alive through live shi
 ## Architecture
 
 - Use the Next.js App Router application as the user-facing command and captain interface.
-- Use `public/fleet.json` as immutable seed data for the scenario, operating bounds, navigable-water polygon, ports, and starting fleet.
+- Use `public/fleet.json` as immutable seed data for the scenario, operating bounds, navigable-water polygon, ports, and starting fleet. This file already contains the permitted fixed data for the judged scenario.
 - Keep simulator state server-side and advance every ship from one authoritative tick loop.
 - Use a persistent realtime channel for fleet snapshots, directives, captain responses, restricted-zone updates, alerts, alert acknowledgements, and playback events.
 - Use client-side interpolation only for display between authoritative snapshots; never let the client become the source of truth for ship state.
@@ -31,6 +31,14 @@ The system must keep the fleet visible, controllable, and alive through live shi
 - Use Open-Meteo as the default weather provider because it has a free tier and can work without a required API key for basic weather data.
 - Use a documented routing strategy first, such as grid/A* over the provided navigable polygon with restricted-zone avoidance and weather cost weighting.
 - Use rule-based/local NLP extraction first if no AI key is configured; document how to upgrade the distress analyzer to an AI-backed extractor.
+
+## Data Rules
+
+- `public/fleet.json` is the allowed hard-coded scenario seed: it contains the operating area, navigable-water polygon, ports, and initial 15 ships.
+- Hard-coded data is only acceptable where the spec explicitly allows it, like basemap tiles and the provided fleet scenario.
+- Ship data after startup must be live simulator state, not static screen data.
+- Alerts, directives, captain responses, weather effects, AI/NLP outputs, and playback history must be generated or updated live by the running system.
+- If the spec does not say something, document the assumption in `README.md` or near the implementation. Documented assumptions will be honored; undocumented assumptions will be judged against the strictest reasonable interpretation.
 
 ## Domain Model
 
@@ -179,7 +187,7 @@ Playback:
 
 - `public/WEB DEVELOPMENT PROBLEM STATEMENT.pdf` is the grading authority.
 - `Plan.md` is the implementation sequencing source of truth.
-- `public/fleet.json` is immutable fixed scenario data.
+- `public/fleet.json` is immutable fixed scenario seed data, not a substitute for live runtime ship state.
 - The first implementation target is a full judged app, with work sequenced from core systems to polish.
 - Runtime state may be in memory for the judged local demo unless the user asks for durable persistence.
 - Open-Meteo is the default weather provider unless a later implementation chooses another documented free-tier source.

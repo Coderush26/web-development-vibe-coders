@@ -4,7 +4,7 @@
 
 This is a Next.js App Router project for the Code Rush Web Dev Track fleet-crisis simulator. Application routes and layout live in `app/`: `app/page.tsx` is the main page, `app/layout.tsx` defines global HTML/body structure, and `app/globals.css` contains Tailwind and global theme styles. Static assets belong in `public/`, including `public/fleet.json` and `public/WEB DEVELOPMENT PROBLEM STATEMENT.pdf`. Root configuration files include `next.config.ts`, `tsconfig.json`, `eslint.config.mjs`, `postcss.config.mjs`, and `pnpm-workspace.yaml`.
 
-Use `public/fleet.json` as the canonical fixed scenario data. It defines the Strait of Hormuz operating area, bounding box, simplified navigable-water polygon, ports, and exactly 15 starting ships. Do not replace it with invented fleet data unless the user explicitly asks.
+Use `public/fleet.json` as the canonical fixed scenario data. It already contains the allowed seed data for the Strait of Hormuz operating area, bounding box, simplified navigable-water polygon, ports, and exactly 15 starting ships. Do not replace it with invented fleet data unless the user explicitly asks.
 
 ## Product Brief
 
@@ -54,9 +54,9 @@ For simulator and geospatial code, prefer well-named pure functions for distance
 
 ## Data, State, and Assumptions
 
-Hard-coded data is acceptable only where the brief allows it, such as basemap tiles or the provided fixed fleet scenario. Ship positions, alerts, directives, captain responses, weather effects, AI/NLP outputs, and playback history should be generated or updated live by the system.
+Hard-coded data is acceptable only where the brief explicitly allows it, such as basemap tiles or the provided fixed fleet scenario in `public/fleet.json`. Ship data after startup, alerts, directives, captain responses, weather effects, AI/NLP outputs, and playback history must be generated or updated live by the system.
 
-When the brief does not specify behavior, document the assumption in `README.md` or close to the relevant implementation. Undocumented assumptions may be judged against the strictest reasonable interpretation.
+When the brief does not specify behavior, document the assumption in `README.md` or close to the relevant implementation. Documented assumptions will be honored; undocumented assumptions may be judged against the strictest reasonable interpretation.
 
 ## UI/UX Guidelines
 
